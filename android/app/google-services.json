@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "625159457653",
+    "project_id": "nexhack-2bc93",
+    "storage_bucket": "nexhack-2bc93.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:625159457653:android:60339c28f477e8f7e8a13c",
+        "android_client_info": {
+          "package_name": "com.ailearning"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "625159457653-2im221c1g5vbtrqbtvm8qtb8qciukbkh.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.ailearning",
+            "certificate_hash": "0b544c23f475c1577b557e24e3ce28105b21ff5c"
+          }
+        },
+        {
+          "client_id": "625159457653-i8qo5p6k1lbbhdcd5k31lcq5i9rhi2c2.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCy9HaRtzxRDilF1bscFAci2QdyjCYaGeo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "625159457653-i8qo5p6k1lbbhdcd5k31lcq5i9rhi2c2.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
