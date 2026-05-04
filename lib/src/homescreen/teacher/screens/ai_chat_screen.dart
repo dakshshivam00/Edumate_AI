@@ -158,7 +158,7 @@ class _TeacherAIChatScreenState extends State<TeacherAIChatScreen> {
 
     await for (final chunk in stream) {
       if (chunk.startsWith('error:')) {
-        responseText = 'Failed to get response: ${chunk.substring(6)}';
+        responseText = 'Server error. Please try again.';
         break;
       }
       responseText += chunk;

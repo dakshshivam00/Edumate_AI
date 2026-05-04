@@ -226,7 +226,7 @@ class ChatService {
   Stream<String> sendChatMessageStream({required String query}) async* {
     final text = await _generateWithGemini(query);
     if (text == null || text.isEmpty) {
-      yield 'error:Unable to fetch response from Gemini. Please try again.';
+      yield 'error:Server error. Please try again.';
       return;
     }
     yield text;
@@ -340,7 +340,7 @@ class ChatService {
         'Use this YouTube video context: $extractedVideoId\n\nUser question: $query';
     final text = await _generateWithGemini(prompt);
     if (text == null || text.isEmpty) {
-      yield 'error:Unable to fetch response from Gemini. Please try again.';
+      yield 'error:Server error. Please try again.';
       return;
     }
     yield text;
