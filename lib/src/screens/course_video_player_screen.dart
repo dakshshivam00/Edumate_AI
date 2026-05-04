@@ -1,4 +1,5 @@
 import 'package:ailearning/src/homescreen/teacher/screens/ai_chat_screen.dart';
+import 'package:ailearning/src/homescreen/services/course_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:ailearning/src/common/app_theme.dart';
@@ -27,18 +28,22 @@ class CourseVideoPlayerScreen extends StatefulWidget {
 }
 
 class _CourseVideoPlayerScreenState extends State<CourseVideoPlayerScreen> {
+  final CourseService _courseService = CourseService();
   List<VideoItem> _videoItems = [];
   int _currentVideoIndex = 0;
   YoutubePlayerController? _controller;
   bool _isLoading = true;
   bool _hasError = false;
   String? _errorMessage;
+  double _courseProgress = 0;
 
   @override
   void initState() {
     super.initState();
+    _courseProgress = widget.progress;
     _initializeVideos();
     _calculateCurrentVideoIndex();
+    _loadSavedProgress();
     if (_videoItems.isNotEmpty) {
       _initializePlayer();
     } else {
@@ -48,6 +53,19 @@ class _CourseVideoPlayerScreenState extends State<CourseVideoPlayerScreen> {
         _errorMessage = 'No valid videos found';
       });
     }
+  }
+
+  Future<void> _loadSavedProgress() async {
+    await _courseService.ensureLoaded();
+    if (!mounted) return;
+
+    final savedProgress = _courseService.getCourseProgress(widget.courseTitle);
+    if (savedProgress <= _courseProgress || _videoItems.isEmpty) return;
+
+    setState(() {
+      _courseProgress = savedProgress;
+      _calculateCurrentVideoIndex();
+    });
   }
 
   void _initializeVideos() {
@@ -73,7 +91,7 @@ class _CourseVideoPlayerScreenState extends State<CourseVideoPlayerScreen> {
     if (_videoItems.isEmpty) return;
 
     final totalVideos = _videoItems.length;
-    final progressPercent = widget.progress;
+    final progressPercent = _courseProgress;
 
     // Calculate watched videos (approximately)
     final watchedVideos = (totalVideos * progressPercent).floor();
@@ -184,6 +202,12 @@ class _CourseVideoPlayerScreenState extends State<CourseVideoPlayerScreen> {
       setState(() {
         _videoItems[_currentVideoIndex].isWatched = true;
       });
+      _courseService.markLessonWatched(
+        courseTitle: widget.courseTitle,
+        lessonIndex: _currentVideoIndex,
+        lessonCount: _videoItems.length,
+      );
+      _courseProgress = (_currentVideoIndex + 1) / _videoItems.length;
     }
 
     // Auto-play next video if available
@@ -208,11 +232,20 @@ class _CourseVideoPlayerScreenState extends State<CourseVideoPlayerScreen> {
           final currentVideoUrl = _currentVideoIndex < _videoItems.length
               ? _videoItems[_currentVideoIndex].url
               : null;
+          final allowedLessonCount = _allowedLessonCount();
           Navigator.push(
             context,
             MaterialPageRoute(
-              builder: (context) =>
-                  TeacherAIChatScreen(videoUrl: currentVideoUrl),
+              builder: (context) => TeacherAIChatScreen(
+                videoUrl: currentVideoUrl,
+                courseTitle: widget.courseTitle,
+                courseProgress: _courseProgress,
+                currentLessonIndex: _currentVideoIndex,
+                allowedLessonTitles: _videoItems
+                    .take(allowedLessonCount)
+                    .map((video) => video.title)
+                    .toList(),
+              ),
             ),
           );
         },
@@ -320,6 +353,17 @@ class _CourseVideoPlayerScreenState extends State<CourseVideoPlayerScreen> {
         ),
       ),
     );
+  }
+
+  int _allowedLessonCount() {
+    if (_videoItems.isEmpty) return 0;
+    final progressBasedCount = (_videoItems.length * _courseProgress).ceil();
+    final count = [
+      progressBasedCount,
+      _currentVideoIndex + 1,
+      1,
+    ].reduce((value, element) => value > element ? value : element);
+    return count.clamp(1, _videoItems.length).toInt();
   }
 
   Widget _buildPlayer() {

@@ -17,13 +17,38 @@ class TeacherCourseDetailScreen extends StatefulWidget {
 
 class _TeacherCourseDetailScreenState extends State<TeacherCourseDetailScreen> {
   final CourseService _courseService = CourseService();
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _courseService.addListener(_onCoursesChanged);
+    _loadCourse();
+  }
+
+  @override
+  void dispose() {
+    _courseService.removeListener(_onCoursesChanged);
+    super.dispose();
+  }
+
+  Future<void> _loadCourse() async {
+    await _courseService.ensureLoaded();
+    if (mounted) setState(() => _isLoading = false);
+  }
+
+  void _onCoursesChanged() {
+    if (mounted) setState(() {});
+  }
 
   @override
   Widget build(BuildContext context) {
-    final course = widget.course;
+    final originalTitle = widget.course['title'] as String? ?? '';
+    final course = _courseService.getTeacherCourse(originalTitle) ??
+        Map<String, dynamic>.from(widget.course);
     final videoUrls = (course['videoUrls'] as List?) ?? [];
-    final courseTitle = course['title'] ?? 'Untitled Course';
-    final instructor = course['instructor'] ?? 'Unknown Instructor';
+    final courseTitle = course['title'] as String? ?? 'Untitled Course';
+    final instructor = course['instructor'] as String? ?? 'Unknown Instructor';
 
     return Scaffold(
       appBar: AppBar(
@@ -37,7 +62,11 @@ class _TeacherCourseDetailScreenState extends State<TeacherCourseDetailScreen> {
           ),
         ],
       ),
-      body: videoUrls.isEmpty
+      body: _isLoading
+          ? Center(
+              child: CircularProgressIndicator(color: AppTheme.secondaryColor),
+            )
+          : videoUrls.isEmpty
           ? Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
@@ -362,7 +391,7 @@ class _TeacherCourseDetailScreenState extends State<TeacherCourseDetailScreen> {
             ),
           ),
           ElevatedButton(
-            onPressed: () {
+            onPressed: () async {
               if (videoTitleController.text.trim().isEmpty) {
                 GlobalScaffoldManager().showSnackbar(
                   'Please enter a video title',
@@ -380,16 +409,22 @@ class _TeacherCourseDetailScreenState extends State<TeacherCourseDetailScreen> {
                 return;
               }
 
-              _courseService.addVideoToCourse(
-                courseTitle: widget.course['title'],
+              final added = await _courseService.addVideoToCourse(
+                courseTitle: widget.course['title'] as String,
                 videoTitle: videoTitleController.text.trim(),
                 videoUrl: videoUrlController.text.trim(),
               );
 
-              Navigator.pop(context);
-              if (mounted) {
-                setState(() {});
+              if (!added) {
+                GlobalScaffoldManager().showSnackbar(
+                  'Unable to add video',
+                  type: SnackbarType.error,
+                  duration: const Duration(seconds: 2),
+                );
+                return;
               }
+
+              Navigator.pop(context);
 
               GlobalScaffoldManager().showSnackbar(
                 'Video added successfully',
@@ -440,17 +475,22 @@ class _TeacherCourseDetailScreenState extends State<TeacherCourseDetailScreen> {
             ),
           ),
           ElevatedButton(
-            onPressed: () {
-              final videoUrls = widget.course['videoUrls'] as List;
-              if (index < videoUrls.length) {
-                videoUrls.removeAt(index);
+            onPressed: () async {
+              final deleted = await _courseService.deleteVideoFromCourse(
+                courseTitle: widget.course['title'] as String,
+                index: index,
+              );
+              if (deleted) {
                 Navigator.pop(context);
-                if (mounted) {
-                  setState(() {});
-                }
                 GlobalScaffoldManager().showSnackbar(
                   'Video deleted successfully',
                   type: SnackbarType.success,
+                  duration: const Duration(seconds: 2),
+                );
+              } else {
+                GlobalScaffoldManager().showSnackbar(
+                  'Unable to delete video',
+                  type: SnackbarType.error,
                   duration: const Duration(seconds: 2),
                 );
               }

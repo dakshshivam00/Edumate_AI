@@ -2,13 +2,23 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:ailearning/src/common/app_theme.dart';
-import 'package:ailearning/src/services/chat_service.dart';
-import 'package:ailearning/src/common/global_snackbar.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class TeacherAIChatScreen extends StatefulWidget {
   final String? videoUrl;
+  final String? courseTitle;
+  final double courseProgress;
+  final int? currentLessonIndex;
+  final List<String> allowedLessonTitles;
 
-  const TeacherAIChatScreen({super.key, this.videoUrl});
+  const TeacherAIChatScreen({
+    super.key,
+    this.videoUrl,
+    this.courseTitle,
+    this.courseProgress = 0,
+    this.currentLessonIndex,
+    this.allowedLessonTitles = const [],
+  });
 
   @override
   State<TeacherAIChatScreen> createState() => _TeacherAIChatScreenState();
@@ -18,21 +28,65 @@ class _TeacherAIChatScreenState extends State<TeacherAIChatScreen> {
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final List<ChatMessage> _messages = [];
-  final ChatService _chatService = ChatService();
   bool _isLoading = false;
-  int? _streamingMessageIndex;
+
+  bool get _isCourseChat =>
+      widget.courseTitle != null && widget.courseTitle!.trim().isNotEmpty;
+
+  String get _historyKey => _isCourseChat
+      ? 'zoomate_course_chat_${widget.courseTitle!.trim().toLowerCase()}'
+      : 'zoomate_global_chat';
 
   @override
   void initState() {
     super.initState();
-    // Add welcome message
-    _messages.add(
-      ChatMessage(
+    _loadHistory();
+  }
+
+  Future<void> _loadHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedHistory = prefs.getString(_historyKey);
+
+    if (savedHistory != null) {
+      try {
+        final decoded = jsonDecode(savedHistory) as List<dynamic>;
+        final messages = decoded
+            .whereType<Map>()
+            .map((message) => ChatMessage.fromJson(message))
+            .toList();
+        if (mounted && messages.isNotEmpty) {
+          setState(() => _messages.addAll(messages));
+          _scrollToBottom();
+          return;
+        }
+      } catch (_) {
+        // Fall through to fresh welcome message.
+      }
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _messages.add(_welcomeMessage());
+    });
+  }
+
+  ChatMessage _welcomeMessage() {
+    if (_isCourseChat) {
+      final unlocked = widget.allowedLessonTitles.length;
+      final progress = (widget.courseProgress * 100).round();
+      return ChatMessage(
         text:
-            'Hello! I\'m your AI teaching assistant. How can I help you today?',
+            'Course chat is active for ${widget.courseTitle}. I will stay inside your unlocked syllabus: $unlocked lesson${unlocked == 1 ? '' : 's'} and $progress% progress.',
         isUser: false,
         timestamp: DateTime.now(),
-      ),
+      );
+    }
+
+    return ChatMessage(
+      text:
+          'Hello! I\'m your Zoomate AI assistant. Ask me anything, or use the course chat from a lesson when you want restricted help.',
+      isUser: false,
+      timestamp: DateTime.now(),
     );
   }
 
@@ -55,115 +109,211 @@ class _TeacherAIChatScreenState extends State<TeacherAIChatScreen> {
     });
   }
 
-  Future<void> _sendMessage() async {
-    final text = _messageController.text.trim();
-    // Prevent sending if message is empty or if we're currently streaming
-    if (text.isEmpty || _streamingMessageIndex != null) return;
+  Future<void> _sendMessage([String? overrideText]) async {
+    final text = (overrideText ?? _messageController.text).trim();
+    if (text.isEmpty || _isLoading) return;
 
     setState(() {
       _messages.add(
         ChatMessage(text: text, isUser: true, timestamp: DateTime.now()),
       );
+      _isLoading = true;
     });
 
     _messageController.clear();
     _scrollToBottom();
 
-    // Create a placeholder message for streaming response
+    await Future.delayed(const Duration(milliseconds: 450));
+    final response = _generateLocalResponse(text);
+
+    if (!mounted) return;
     setState(() {
       _messages.add(
-        ChatMessage(text: '', isUser: false, timestamp: DateTime.now()),
+        ChatMessage(text: response, isUser: false, timestamp: DateTime.now()),
       );
-      _streamingMessageIndex = _messages.length - 1;
-      _isLoading =
-          false; // Don't show loading indicator, we're showing streaming text
+      _isLoading = false;
     });
+    await _saveHistory();
+    _scrollToBottom();
+  }
 
-    // Send message to chat API with streaming
-    // Use video streaming if videoUrl is present, otherwise use regular streaming
-    try {
-      final stream = widget.videoUrl != null && widget.videoUrl!.isNotEmpty
-          ? _chatService.sendChatMessageWithVideoStream(
-              query: text,
-              videoUrl: widget.videoUrl!,
-            )
-          : _chatService.sendChatMessageStream(query: text);
+  Future<void> _saveHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      _historyKey,
+      jsonEncode(_messages.map((message) => message.toJson()).toList()),
+    );
+  }
 
-      await for (final chunk in stream) {
-        if (!mounted) return;
+  String _generateLocalResponse(String query) {
+    return _isCourseChat
+        ? _generateCourseResponse(query)
+        : _generateGlobalResponse(query);
+  }
 
-        // Handle errors
-        if (chunk.startsWith('error:')) {
-          final errorParts = chunk.substring(6).split(':');
-          final errorMessage = errorParts.length > 1
-              ? errorParts.sublist(1).join(':')
-              : errorParts[0];
+  String _generateCourseResponse(String query) {
+    final lower = query.toLowerCase();
+    final unlockedCount = widget.allowedLessonTitles.length;
+    final requestedLesson = _requestedLessonNumber(lower);
 
-          setState(() {
-            if (_streamingMessageIndex != null &&
-                _streamingMessageIndex! < _messages.length) {
-              _messages[_streamingMessageIndex!] = ChatMessage(
-                text: 'Sorry, I encountered an error: $errorMessage',
-                isUser: false,
-                timestamp: _messages[_streamingMessageIndex!].timestamp,
-              );
-            }
-            _isLoading = false;
-            _streamingMessageIndex = null;
-          });
-
-          GlobalScaffoldManager().showSnackbar(
-            'Error: $errorMessage',
-            type: SnackbarType.error,
-          );
-          break;
-        } else if (chunk.isNotEmpty) {
-          // Update streaming message with new chunk
-          setState(() {
-            if (_streamingMessageIndex != null &&
-                _streamingMessageIndex! < _messages.length) {
-              final currentMessage = _messages[_streamingMessageIndex!];
-              _messages[_streamingMessageIndex!] = ChatMessage(
-                text: currentMessage.text + chunk,
-                isUser: false,
-                timestamp: currentMessage.timestamp,
-              );
-            }
-          });
-          _scrollToBottom();
-        }
-      }
-
-      // Streaming complete
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-          _streamingMessageIndex = null;
-        });
-        _scrollToBottom();
-      }
-    } catch (e) {
-      if (!mounted) return;
-
-      setState(() {
-        if (_streamingMessageIndex != null &&
-            _streamingMessageIndex! < _messages.length) {
-          _messages[_streamingMessageIndex!] = ChatMessage(
-            text: 'An error occurred: ${e.toString()}',
-            isUser: false,
-            timestamp: _messages[_streamingMessageIndex!].timestamp,
-          );
-        }
-        _isLoading = false;
-        _streamingMessageIndex = null;
-      });
-
-      GlobalScaffoldManager().showSnackbar(
-        'Error: ${e.toString()}',
-        type: SnackbarType.error,
-      );
-      _scrollToBottom();
+    if (requestedLesson != null && requestedLesson > unlockedCount) {
+      return 'This course chat is progress-restricted. You have unlocked only the first $unlockedCount lesson${unlockedCount == 1 ? '' : 's'} of ${widget.courseTitle}, so I cannot answer from lesson $requestedLesson yet. Watch more lectures to unlock that topic.';
     }
+
+    if (_asksForFutureContent(lower)) {
+      return 'I will keep this answer inside your unlocked syllabus. For now, focus on: ${_allowedLessonSummary()}. I can explain, summarize, or quiz you on these lessons.';
+    }
+
+    if (_asksForQuiz(lower)) {
+      return jsonEncode({
+        'questions': [
+          {
+            'question':
+                'Which part of ${widget.courseTitle} should you revise first based on your unlocked progress?',
+            'options': [
+              widget.allowedLessonTitles.isEmpty
+                  ? 'The current lesson'
+                  : widget.allowedLessonTitles.first,
+              'A locked future lesson',
+              'An unrelated topic',
+              'Skip all practice',
+            ],
+            'answer': widget.allowedLessonTitles.isEmpty
+                ? 'The current lesson'
+                : widget.allowedLessonTitles.first,
+          },
+          {
+            'question':
+                'What is the best way to use course chat in Zoomate AI?',
+            'options': [
+              'Ask only from unlocked course content',
+              'Ask for answers from future chapters',
+              'Ignore the current lecture',
+              'Use it only for account settings',
+            ],
+            'answer': 'Ask only from unlocked course content',
+          },
+        ],
+      });
+    }
+
+    if (lower.contains('summar')) {
+      return 'Summary for your unlocked ${widget.courseTitle} syllabus: ${_allowedLessonSummary()}. Revise the definitions, write a small example from each lesson, and then solve a quick practice question before moving ahead.';
+    }
+
+    if (lower.contains('explain') || lower.contains('doubt')) {
+      return 'Here is a simple explanation inside your current course boundary: break the topic into what it means, why it is used, and one small example. For ${widget.courseTitle}, stay focused on ${_allowedLessonSummary()}.';
+    }
+
+    return 'I can help with this, but only from your unlocked ${widget.courseTitle} content. Based on your ${(widget.courseProgress * 100).round()}% progress, use these lessons as the source: ${_allowedLessonSummary()}.';
+  }
+
+  String _generateGlobalResponse(String query) {
+    final lower = query.toLowerCase();
+
+    if (_asksForQuiz(lower)) {
+      return jsonEncode({
+        'questions': [
+          {
+            'question': 'What is the main purpose of Zoomate AI?',
+            'options': [
+              'Structured learning with AI support',
+              'Only social messaging',
+              'Only video editing',
+              'Only payment tracking',
+            ],
+            'answer': 'Structured learning with AI support',
+          },
+          {
+            'question':
+                'Which chat mode should students use for syllabus-limited help?',
+            'options': [
+              'Course chat',
+              'Profile page',
+              'Settings page',
+              'Launcher screen',
+            ],
+            'answer': 'Course chat',
+          },
+        ],
+      });
+    }
+
+    if (lower.contains('course chat') || lower.contains('global chat')) {
+      return 'Global chat is open for general questions. Course chat is opened from a lecture and stays restricted to the lessons unlocked by the student progress.';
+    }
+
+    if (lower.contains('study plan') || lower.contains('plan')) {
+      return 'A good study plan is: watch one lecture, write short notes, ask course chat for doubts, solve a small quiz, then move to the next lecture only after the idea feels clear.';
+    }
+
+    return 'I can help with general learning, programming doubts, explanations, quiz ideas, and planning. Since this is frontend-only right now, I answer with local guidance rather than calling an external AI backend.';
+  }
+
+  int? _requestedLessonNumber(String query) {
+    final match = RegExp(
+      r'(lesson|lecture|video)\s*(\d+)',
+    ).firstMatch(query);
+    if (match == null) return null;
+    return int.tryParse(match.group(2) ?? '');
+  }
+
+  bool _asksForFutureContent(String query) {
+    return query.contains('future') ||
+        query.contains('next chapter') ||
+        query.contains('next lesson') ||
+        query.contains('advanced') ||
+        query.contains('beyond syllabus') ||
+        query.contains('upcoming');
+  }
+
+  bool _asksForQuiz(String query) {
+    return query.contains('quiz') ||
+        query.contains('test') ||
+        query.contains('question') ||
+        query.contains('mcq');
+  }
+
+  String _allowedLessonSummary() {
+    if (widget.allowedLessonTitles.isEmpty) {
+      return 'the current lesson';
+    }
+    return widget.allowedLessonTitles.join(', ');
+  }
+
+  Widget _buildPromptChips() {
+    final prompts = _isCourseChat
+        ? const ['Summarize', 'Make quiz', 'Explain simply']
+        : const ['Study plan', 'Generate quiz', 'Global vs course chat'];
+
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: prompts
+            .map(
+              (prompt) => Padding(
+                padding: EdgeInsets.only(right: 8.w),
+                child: ActionChip(
+                  label: Text(prompt),
+                  onPressed: _isLoading ? null : () => _sendMessage(prompt),
+                  backgroundColor: AppTheme.textPrimary.withOpacity(
+                    AppTheme.containerOpacity,
+                  ),
+                  labelStyle: TextStyle(
+                    color: AppTheme.textPrimary,
+                    fontSize: 12.sp,
+                  ),
+                  side: BorderSide(
+                    color: AppTheme.textPrimary.withOpacity(
+                      AppTheme.borderOpacity,
+                    ),
+                  ),
+                ),
+              ),
+            )
+            .toList(),
+      ),
+    );
   }
 
   @override
@@ -192,7 +342,9 @@ class _TeacherAIChatScreenState extends State<TeacherAIChatScreen> {
               children: [
                 const Text('AI Assistant'),
                 Text(
-                  'Always here to help',
+                  _isCourseChat
+                      ? '${widget.allowedLessonTitles.length} lessons unlocked'
+                      : 'Global chat',
                   style: TextStyle(
                     fontSize: 12.sp,
                     color: AppTheme.textPrimary.withOpacity(
@@ -205,48 +357,20 @@ class _TeacherAIChatScreenState extends State<TeacherAIChatScreen> {
           ],
         ),
         centerTitle: false,
-        // actions: [
-        //   IconButton(
-        //     icon: const Icon(Icons.more_vert),
-        //     onPressed: () {
-        //       // Show options menu
-        //       showModalBottomSheet(
-        //         context: context,
-        //         backgroundColor: AppTheme.primaryColor,
-        //         shape: RoundedRectangleBorder(
-        //           borderRadius: BorderRadius.vertical(
-        //             top: Radius.circular(20.r),
-        //           ),
-        //         ),
-        //         builder: (context) => Container(
-        //           padding: EdgeInsets.all(20.w),
-        //           child: Column(
-        //             mainAxisSize: MainAxisSize.min,
-        //             children: [
-        //               ListTile(
-        //                 leading: const Icon(Icons.cleaning_services),
-        //                 title: const Text('Clear Chat'),
-        //                 onTap: () {
-        //                   Navigator.pop(context);
-        //                   setState(() {
-        //                     _messages.clear();
-        //                     _messages.add(
-        //                       ChatMessage(
-        //                         text: 'Chat cleared. How can I help you today?',
-        //                         isUser: false,
-        //                         timestamp: DateTime.now(),
-        //                       ),
-        //                     );
-        //                   });
-        //                 },
-        //               ),
-        //             ],
-        //           ),
-        //         ),
-        //       );
-        //     },
-        //   ),
-        // ],
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.cleaning_services_outlined),
+            tooltip: 'Clear chat',
+            onPressed: () async {
+              setState(() {
+                _messages
+                  ..clear()
+                  ..add(_welcomeMessage());
+              });
+              await _saveHistory();
+            },
+          ),
+        ],
       ),
       body: Column(
         children: [
@@ -359,84 +483,89 @@ class _TeacherAIChatScreenState extends State<TeacherAIChatScreen> {
             padding: EdgeInsets.symmetric(horizontal: 16.w, vertical: 12.h),
             decoration: BoxDecoration(color: AppTheme.primaryColor),
             child: SafeArea(
-              child: Row(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  Expanded(
-                    child: ConstrainedBox(
-                      constraints: BoxConstraints(
-                        maxHeight: 240.h, // Maximum height for input field
-                      ),
-                      child: TextFormField(
-                        controller: _messageController,
-                        textCapitalization: TextCapitalization.sentences,
-                        decoration: InputDecoration(
-                          hintText: 'Type your message...',
-                          hintStyle: TextStyle(
-                            color: AppTheme.textPrimary.withOpacity(
-                              AppTheme.textTertiaryOpacity,
-                            ),
-                            fontSize: 16.sp,
-                          ),
-                          filled: true,
-                          fillColor: AppTheme.textPrimary.withOpacity(
-                            AppTheme.containerOpacity,
-                          ),
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(24.r),
-                            borderSide: BorderSide(
-                              color: AppTheme.textPrimary.withOpacity(
-                                AppTheme.borderOpacity,
+                  _buildPromptChips(),
+                  SizedBox(height: 8.h),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: ConstrainedBox(
+                          constraints: BoxConstraints(maxHeight: 240.h),
+                          child: TextFormField(
+                            controller: _messageController,
+                            textCapitalization: TextCapitalization.sentences,
+                            decoration: InputDecoration(
+                              hintText: _isCourseChat
+                                  ? 'Ask from unlocked course content...'
+                                  : 'Ask anything...',
+                              hintStyle: TextStyle(
+                                color: AppTheme.textPrimary.withOpacity(
+                                  AppTheme.textTertiaryOpacity,
+                                ),
+                                fontSize: 16.sp,
+                              ),
+                              filled: true,
+                              fillColor: AppTheme.textPrimary.withOpacity(
+                                AppTheme.containerOpacity,
+                              ),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(24.r),
+                                borderSide: BorderSide(
+                                  color: AppTheme.textPrimary.withOpacity(
+                                    AppTheme.borderOpacity,
+                                  ),
+                                ),
+                              ),
+                              enabledBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(24.r),
+                                borderSide: BorderSide(
+                                  color: AppTheme.textPrimary.withOpacity(
+                                    AppTheme.borderOpacity,
+                                  ),
+                                ),
+                              ),
+                              focusedBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(24.r),
+                                borderSide: BorderSide(
+                                  color: AppTheme.secondaryColor,
+                                  width: 1.5,
+                                ),
+                              ),
+                              contentPadding: EdgeInsets.symmetric(
+                                horizontal: 20.w,
+                                vertical: 12.h,
                               ),
                             ),
-                          ),
-                          enabledBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(24.r),
-                            borderSide: BorderSide(
-                              color: AppTheme.textPrimary.withOpacity(
-                                AppTheme.borderOpacity,
-                              ),
+                            style: TextStyle(
+                              color: AppTheme.textPrimary,
+                              fontSize: 16.sp,
                             ),
-                          ),
-                          focusedBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(24.r),
-                            borderSide: BorderSide(
-                              color: AppTheme.secondaryColor,
-                              width: 1.5,
-                            ),
-                          ),
-                          contentPadding: EdgeInsets.symmetric(
-                            horizontal: 20.w,
-                            vertical: 12.h,
+                            maxLines: null,
+                            minLines: 1,
+                            textInputAction: TextInputAction.newline,
+                            keyboardType: TextInputType.multiline,
                           ),
                         ),
-                        style: TextStyle(
-                          color: AppTheme.textPrimary,
-                          fontSize: 16.sp,
+                      ),
+                      SizedBox(width: 12.w),
+                      Container(
+                        decoration: BoxDecoration(
+                          color: AppTheme.secondaryColor,
+                          shape: BoxShape.circle,
                         ),
-                        maxLines: null,
-                        minLines: 1,
-                        textInputAction: TextInputAction.newline,
-                        keyboardType: TextInputType.multiline,
-                        // Allows Enter key (newline). To send, user taps send button.
-                        // When text exceeds maxHeight, it will scroll up automatically
+                        child: IconButton(
+                          icon: Icon(
+                            Icons.send,
+                            color: AppTheme.buttonForeground,
+                            size: 24.sp,
+                          ),
+                          onPressed: _isLoading ? null : () => _sendMessage(),
+                          tooltip: 'Send message',
+                        ),
                       ),
-                    ),
-                  ),
-                  SizedBox(width: 12.w),
-                  Container(
-                    decoration: BoxDecoration(
-                      color: AppTheme.secondaryColor,
-                      shape: BoxShape.circle,
-                    ),
-                    child: IconButton(
-                      icon: Icon(
-                        Icons.send,
-                        color: AppTheme.buttonForeground,
-                        size: 24.sp,
-                      ),
-                      onPressed: _sendMessage,
-                      tooltip: 'Send message',
-                    ),
+                    ],
                   ),
                 ],
               ),
@@ -458,6 +587,24 @@ class ChatMessage {
     required this.isUser,
     required this.timestamp,
   });
+
+  factory ChatMessage.fromJson(Map<dynamic, dynamic> json) {
+    return ChatMessage(
+      text: (json['text'] ?? '').toString(),
+      isUser: json['isUser'] == true,
+      timestamp:
+          DateTime.tryParse((json['timestamp'] ?? '').toString()) ??
+          DateTime.now(),
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'text': text,
+      'isUser': isUser,
+      'timestamp': timestamp.toIso8601String(),
+    };
+  }
 }
 
 class ChatBubble extends StatelessWidget {
@@ -501,7 +648,7 @@ class ChatBubble extends StatelessWidget {
 
     Widget content;
     if (isQuiz) {
-      content = _buildQuizWidget(jsonData!);
+      content = _buildQuizWidget(jsonData);
     } else if (jsonData != null) {
       content = _buildJsonWidget(jsonData);
     } else {

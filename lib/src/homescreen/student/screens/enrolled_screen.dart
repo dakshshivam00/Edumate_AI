@@ -1,136 +1,158 @@
-// import 'package:ailearning/src/homescreen/teacher/screens/ai_chat_screen.dart';
-// import 'package:ailearning/src/services/chat_service.dart';
+import 'package:ailearning/src/homescreen/services/course_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:ailearning/src/common/app_theme.dart';
 import 'package:ailearning/src/screens/course_video_player_screen.dart';
 
-class EnrolledScreen extends StatelessWidget {
+class EnrolledScreen extends StatefulWidget {
   const EnrolledScreen({super.key});
 
   @override
+  State<EnrolledScreen> createState() => _EnrolledScreenState();
+}
+
+class _EnrolledScreenState extends State<EnrolledScreen> {
+  final CourseService _courseService = CourseService();
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _courseService.addListener(_onCoursesChanged);
+    _loadCourses();
+  }
+
+  @override
+  void dispose() {
+    _courseService.removeListener(_onCoursesChanged);
+    super.dispose();
+  }
+
+  Future<void> _loadCourses() async {
+    await _courseService.ensureLoaded();
+    if (mounted) setState(() => _isLoading = false);
+  }
+
+  void _onCoursesChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final courses = _courseService.enrolledCourses;
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('My Courses'),
         centerTitle: true,
         scrolledUnderElevation: 0,
       ),
-      // floatingActionButton: FloatingActionButton(
-      //   backgroundColor: AppTheme.secondaryColor,
-      //   onPressed: () {
-      //     ChatService().sendChatMessageWithVideo(
-      //       query: 'what is react router dom',
-      //       videoUrl: 'https://youtu.be/luAkR9VaLcw?si=y72Bsnk-xR4643yi',
-      //     );
-      //   },
-      //   child: Icon(Icons.smart_toy, color: Colors.black, size: 24.sp),
-      // ),
-      body: ListView.builder(
-        padding: EdgeInsets.all(16.w),
-        itemCount: _enrolledCourses.length,
-        itemBuilder: (context, index) => EnrolledCourseCard(
-          title: _enrolledCourses[index]['title']!,
-          instructor: _enrolledCourses[index]['instructor']!,
-          progress: _enrolledCourses[index]['progress']!,
-          thumbnail: _enrolledCourses[index]['thumbnail']!,
-          videoUrls: (_enrolledCourses[index]['videoUrls'] as List<dynamic>)
-              .map((e) => e.toString())
-              .toList(),
+      body: _isLoading
+          ? Center(
+              child: CircularProgressIndicator(color: AppTheme.secondaryColor),
+            )
+          : courses.isEmpty
+          ? _buildEmptyState()
+          : ListView.builder(
+              padding: EdgeInsets.all(16.w),
+              itemCount: courses.length,
+              itemBuilder: (context, index) {
+                final course = courses[index];
+                return EnrolledCourseCard(
+                  title: course['title'] as String? ?? 'Course',
+                  instructor:
+                      course['instructor'] as String? ?? 'Unknown Instructor',
+                  progress: (course['progress'] as num?)?.toDouble() ?? 0,
+                  videoUrls: _extractVideoUrls(course['videoUrls']),
+                  onProgressChanged: () {
+                    if (mounted) setState(() {});
+                  },
+                );
+              },
+            ),
+    );
+  }
+
+  Widget _buildEmptyState() {
+    return Center(
+      child: Padding(
+        padding: EdgeInsets.all(24.w),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.school_outlined,
+              size: 64.sp,
+              color: AppTheme.textPrimary.withOpacity(
+                AppTheme.textTertiaryOpacity,
+              ),
+            ),
+            SizedBox(height: 16.h),
+            Text(
+              'No enrolled courses yet',
+              style: TextStyle(
+                fontSize: 18.sp,
+                color: AppTheme.textPrimary,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            SizedBox(height: 8.h),
+            Text(
+              'Enroll from the Courses tab to start learning.',
+              style: TextStyle(
+                fontSize: 14.sp,
+                color: AppTheme.textPrimary.withOpacity(
+                  AppTheme.textSecondaryOpacity,
+                ),
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
         ),
       ),
     );
   }
 
-  static final List<Map<String, dynamic>> _enrolledCourses = [
-    {
-      'title': 'JAVA & DSA',
-      'instructor': 'Shradha Khapra',
-      'progress': 0.25,
-      'thumbnail': 'DSA',
-      'videoUrls': [
-        'https://youtu.be/luAkR9VaLcw?si=y72Bsnk-xR4643yi',
-        'https://youtu.be/XQfHvqp7kXU?si=GV_zGM6uHBmdUNOY',
-        'https://youtu.be/2uoO_fY1aDs?si=JFph3_U5slTCOM-G',
-        'https://youtu.be/0r1SfRoLuzU?list=PLfqMhTWNBTe3LtFWcvwpqTkUSlB32kJop',
-        'https://youtu.be/GjHNGM7KN3w?list=PLfqMhTWNBTe3LtFWcvwpqTkUSlB32kJop',
-        'https://youtu.be/Dr4PpNa7AYo?list=PLfqMhTWNBTe3LtFWcvwpqTkUSlB32kJop',
-        'https://youtu.be/qcSz4ef9UHA?list=PLfqMhTWNBTe3LtFWcvwpqTkUSlB32kJop',
-        'https://youtu.be/pFPZ83mgH00?list=PLfqMhTWNBTe3LtFWcvwpqTkUSlB32kJop',
-        'https://youtu.be/bQssdSrSGNE?list=PLfqMhTWNBTe3LtFWcvwpqTkUSlB32kJop',
-        'https://youtu.be/NTHVTY6w2Co?list=PLfqMhTWNBTe3LtFWcvwpqTkUSlB32kJop',
-      ],
-    },
-    {
-      'title': 'Flutter Development',
-      'instructor': 'WS cube',
-      'progress': 0.30,
-      'thumbnail': 'flutter',
-      'videoUrls': [
-        'https://youtu.be/jqxz7QvdWk8?list=PLjVLYmrlmjGfGLShoW0vVX_tcyT8u1Y3E',
-        'https://youtu.be/PKDWinlLfAo?list=PLjVLYmrlmjGfGLShoW0vVX_tcyT8u1Y3E',
-        'https://youtu.be/BqHOtlh3Dd4?list=PLjVLYmrlmjGfGLShoW0vVX_tcyT8u1Y3E',
-        'https://youtu.be/VPoqbBXzGtA?list=PLjVLYmrlmjGfGLShoW0vVX_tcyT8u1Y3E',
-        'https://youtu.be/SR-AB3RJWbg?list=PLjVLYmrlmjGfGLShoW0vVX_tcyT8u1Y3E',
-        'https://youtu.be/p91tt2AwUjM?list=PLjVLYmrlmjGfGLShoW0vVX_tcyT8u1Y3E',
-        'https://youtu.be/YOHFxBaPGQU?list=PLjVLYmrlmjGfGLShoW0vVX_tcyT8u1Y3E',
-        'https://youtu.be/B3MoTP3veBk?list=PLjVLYmrlmjGfGLShoW0vVX_tcyT8u1Y3E',
-        'https://youtu.be/_qkywk2VeHU?list=PLjVLYmrlmjGfGLShoW0vVX_tcyT8u1Y3E',
-        'https://youtu.be/JzzBYI2LhLI?list=PLjVLYmrlmjGfGLShoW0vVX_tcyT8u1Y3E',
-      ],
-    },
-    {
-      'title': 'Adobe premiere pro',
-      'instructor': 'GFX mentor',
-      'progress': 0.65,
-      'thumbnail': 'adobe',
-      'videoUrls': [
-        'https://youtu.be/h6eeDgBjZq8?list=PLW-zSkCnZ-gABGZU8--ISUauyewG40Yex',
-        'https://youtu.be/TP8wre-Mm1k?list=PLW-zSkCnZ-gABGZU8--ISUauyewG40Yex',
-        'https://youtu.be/kCGNe7BFq6g?list=PLW-zSkCnZ-gABGZU8--ISUauyewG40Yex',
-        'https://youtu.be/2TyL6ViQDwQ?list=PLW-zSkCnZ-gABGZU8--ISUauyewG40Yex',
-        'https://youtu.be/wDbosNeayeA?list=PLW-zSkCnZ-gABGZU8--ISUauyewG40Yex',
-        'https://youtu.be/K-WDpib9mv0?list=PLW-zSkCnZ-gABGZU8--ISUauyewG40Yex',
-        'https://youtu.be/t--TP6YcI7Q?list=PLW-zSkCnZ-gABGZU8--ISUauyewG40Yex',
-        'https://youtu.be/B4j4CMldcdk?list=PLW-zSkCnZ-gABGZU8--ISUauyewG40Yex',
-        'https://youtu.be/_WnWwzHIxJo?list=PLW-zSkCnZ-gABGZU8--ISUauyewG40Yex',
-        'https://youtu.be/_cH9wCi4Ihg?list=PLW-zSkCnZ-gABGZU8--ISUauyewG40Yex',
-      ],
-    },
-  ];
+  List<String> _extractVideoUrls(dynamic rawVideos) {
+    final videos = (rawVideos as List?) ?? const [];
+    return videos
+        .map((video) {
+          if (video is Map) {
+            return (video['url'] ?? video['videoUrl'] ?? '').toString();
+          }
+          return video.toString();
+        })
+        .where((url) => url.isNotEmpty)
+        .toList();
+  }
 }
 
 class EnrolledCourseCard extends StatelessWidget {
   final String title;
   final String instructor;
   final double progress;
-  final String thumbnail;
   final List<String> videoUrls;
+  final VoidCallback onProgressChanged;
 
   const EnrolledCourseCard({
     super.key,
     required this.title,
     required this.instructor,
     required this.progress,
-    required this.thumbnail,
     required this.videoUrls,
+    required this.onProgressChanged,
   });
 
   String? _extractVideoId(String url) {
     try {
       final uri = Uri.parse(url);
-      String? videoId;
-
-      // Handle youtu.be format: https://youtu.be/VIDEO_ID
       if (uri.host.contains('youtu.be')) {
-        videoId = uri.pathSegments.isNotEmpty ? uri.pathSegments[0] : null;
+        return uri.pathSegments.isNotEmpty ? uri.pathSegments[0] : null;
       }
-      // Handle youtube.com format: https://www.youtube.com/watch?v=VIDEO_ID
-      else if (uri.host.contains('youtube.com')) {
-        videoId = uri.queryParameters['v'];
+      if (uri.host.contains('youtube.com')) {
+        return uri.queryParameters['v'];
       }
-
-      return videoId;
+      return null;
     } catch (e) {
       return null;
     }
@@ -141,14 +163,10 @@ class EnrolledCourseCard extends StatelessWidget {
   }
 
   Widget _buildThumbnail() {
-    if (videoUrls.isEmpty) {
-      return _buildPlaceholder();
-    }
+    if (videoUrls.isEmpty) return _buildPlaceholder();
 
     final videoId = _extractVideoId(videoUrls[0]);
-    if (videoId == null || videoId.isEmpty) {
-      return _buildPlaceholder();
-    }
+    if (videoId == null || videoId.isEmpty) return _buildPlaceholder();
 
     return Container(
       width: 120.w,
@@ -164,9 +182,8 @@ class EnrolledCourseCard extends StatelessWidget {
             Image.network(
               _getThumbnailUrl(videoId),
               fit: BoxFit.cover,
-              errorBuilder: (context, error, stackTrace) {
-                return _buildPlaceholder();
-              },
+              errorBuilder: (context, error, stackTrace) =>
+                  _buildPlaceholder(),
               loadingBuilder: (context, child, loadingProgress) {
                 if (loadingProgress == null) return child;
                 return Container(
@@ -185,7 +202,6 @@ class EnrolledCourseCard extends StatelessWidget {
                 );
               },
             ),
-            // Play icon overlay
             Container(
               color: Colors.black.withOpacity(0.3),
               child: Center(
@@ -233,10 +249,7 @@ class EnrolledCourseCard extends StatelessWidget {
       ),
       child: Row(
         children: [
-          // Thumbnail
           Padding(padding: EdgeInsets.all(8.w), child: _buildThumbnail()),
-
-          // Course Info
           Expanded(
             child: Padding(
               padding: EdgeInsets.all(12.sp),
@@ -264,72 +277,67 @@ class EnrolledCourseCard extends StatelessWidget {
                       ),
                     ),
                   ),
-                  SizedBox(height: 4.h),
-
-                  // Progress Bar
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                  SizedBox(height: 6.h),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            'Progress',
-                            style: TextStyle(
-                              fontSize: 12.sp,
-                              color: AppTheme.textPrimary.withOpacity(
-                                AppTheme.textSecondaryOpacity,
-                              ),
-                            ),
+                      Text(
+                        'Progress',
+                        style: TextStyle(
+                          fontSize: 12.sp,
+                          color: AppTheme.textPrimary.withOpacity(
+                            AppTheme.textSecondaryOpacity,
                           ),
-                          Text(
-                            '${(progress * 100).toInt()}%',
-                            style: TextStyle(
-                              fontSize: 12.sp,
-                              fontWeight: FontWeight.bold,
-                              color: AppTheme.textPrimary,
-                            ),
-                          ),
-                        ],
+                        ),
                       ),
-                      SizedBox(height: 6.h),
-                      LinearProgressIndicator(
-                        value: progress,
-                        backgroundColor: AppTheme.textPrimary.withOpacity(
-                          AppTheme.containerOpacity,
+                      Text(
+                        '${(progress * 100).toInt()}%',
+                        style: TextStyle(
+                          fontSize: 12.sp,
+                          fontWeight: FontWeight.bold,
+                          color: AppTheme.textPrimary,
                         ),
-                        valueColor: AlwaysStoppedAnimation<Color>(
-                          AppTheme.secondaryColor,
-                        ),
-                        minHeight: 4.h,
                       ),
                     ],
                   ),
-
-                  SizedBox(height: 4.h),
-
-                  // Continue Button
+                  SizedBox(height: 6.h),
+                  LinearProgressIndicator(
+                    value: progress,
+                    backgroundColor: AppTheme.textPrimary.withOpacity(
+                      AppTheme.containerOpacity,
+                    ),
+                    valueColor: AlwaysStoppedAnimation<Color>(
+                      AppTheme.secondaryColor,
+                    ),
+                    minHeight: 4.h,
+                  ),
+                  SizedBox(height: 8.h),
                   SizedBox(
                     width: double.infinity,
                     child: ElevatedButton(
-                      onPressed: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (context) => CourseVideoPlayerScreen(
-                              videoUrls: videoUrls,
-                              courseTitle: title,
-                              instructor: instructor,
-                              progress: progress,
-                            ),
-                          ),
-                        );
-                      },
+                      onPressed: videoUrls.isEmpty
+                          ? null
+                          : () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (context) =>
+                                      CourseVideoPlayerScreen(
+                                        videoUrls: videoUrls,
+                                        courseTitle: title,
+                                        instructor: instructor,
+                                        progress: progress,
+                                      ),
+                                ),
+                              ).then((_) => onProgressChanged());
+                            },
                       style: ElevatedButton.styleFrom(
                         padding: EdgeInsets.symmetric(vertical: 8.h),
                       ),
                       child: Text(
-                        'Continue Learning',
+                        videoUrls.isEmpty
+                            ? 'No Videos Yet'
+                            : 'Continue Learning',
                         style: TextStyle(fontSize: 14.sp),
                       ),
                     ),

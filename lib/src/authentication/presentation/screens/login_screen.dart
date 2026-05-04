@@ -7,7 +7,6 @@ import 'package:ailearning/src/common/global_snackbar.dart';
 import 'package:ailearning/src/common/custom_elevated_button.dart';
 import 'package:ailearning/src/common/gradient_container.dart';
 import 'package:ailearning/src/common/user_role_service.dart';
-import 'package:ailearning/src/services/fcm_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 
@@ -31,7 +30,6 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _isGoogleLoading = false;
   final AuthProvider _authProvider = AuthProvider();
   final UserRoleService _userRoleService = UserRoleService();
-  final FCMService _fcmService = FCMService();
 
   @override
   void dispose() {
@@ -144,10 +142,6 @@ class _LoginScreenState extends State<LoginScreen> {
         );
       }
 
-      // Request FCM token and send to backend
-      await _fcmService.requestNotificationPermissions();
-      await _fcmService.sendFCMTokenToBackend(isStudentValue);
-
       // Navigation will be handled automatically by AuthWrapper
     } catch (e) {
       // Show error snackbar
@@ -200,10 +194,6 @@ class _LoginScreenState extends State<LoginScreen> {
           duration: const Duration(seconds: 3),
         );
       }
-
-      // Request FCM token and send to backend
-      await _fcmService.requestNotificationPermissions();
-      await _fcmService.sendFCMTokenToBackend(isStudentValue);
 
       // Navigation will be handled automatically by AuthWrapper
     } catch (e) {
@@ -379,7 +369,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   ),
 
                 // Forgot Password (Login only)
-                if (_isLogin)
+                if (_isLogin) ...[
                   Align(
                     alignment: Alignment.centerRight,
                     child: TextButton(
@@ -403,8 +393,8 @@ class _LoginScreenState extends State<LoginScreen> {
                       ),
                     ),
                   ),
-                if (!_isLogin) SizedBox(height: 24.h),
-
+                  SizedBox(height: 24.h),
+                ],
                 // Submit Button
                 CustomElevatedButton(
                   title: _isLogin ? 'Login' : 'Sign Up',

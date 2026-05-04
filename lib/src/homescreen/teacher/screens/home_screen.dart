@@ -60,6 +60,29 @@ class TeacherCoursesScreen extends StatefulWidget {
 
 class _TeacherCoursesScreenState extends State<TeacherCoursesScreen> {
   final CourseService _courseService = CourseService();
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _courseService.addListener(_onCoursesChanged);
+    _loadCourses();
+  }
+
+  @override
+  void dispose() {
+    _courseService.removeListener(_onCoursesChanged);
+    super.dispose();
+  }
+
+  Future<void> _loadCourses() async {
+    await _courseService.ensureLoaded();
+    if (mounted) setState(() => _isLoading = false);
+  }
+
+  void _onCoursesChanged() {
+    if (mounted) setState(() {});
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -77,7 +100,11 @@ class _TeacherCoursesScreenState extends State<TeacherCoursesScreen> {
           ),
         ],
       ),
-      body: courses.isEmpty
+      body: _isLoading
+          ? Center(
+              child: CircularProgressIndicator(color: AppTheme.secondaryColor),
+            )
+          : courses.isEmpty
           ? Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
@@ -120,25 +147,27 @@ class _TeacherCoursesScreenState extends State<TeacherCoursesScreen> {
             )
           : ListView.builder(
               padding: EdgeInsets.all(16.w),
-              itemCount: courses.length,
-              itemBuilder: (context, index) => TeacherCourseCard(
-                course: courses[index],
-                onTap: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) =>
-                          TeacherCourseDetailScreen(course: courses[index]),
-                    ),
-                  ).then((_) {
-                    // Refresh the list when returning from detail screen
-                    if (mounted) {
-                      setState(() {});
-                    }
-                  });
-                },
-                onAddVideo: () => _showAddVideoDialog(context, courses[index]),
-              ),
+              itemCount: courses.length + 1,
+              itemBuilder: (context, index) {
+                if (index == 0) {
+                  return TeacherStatsHeader(courseService: _courseService);
+                }
+
+                final course = courses[index - 1];
+                return TeacherCourseCard(
+                  course: course,
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) =>
+                            TeacherCourseDetailScreen(course: course),
+                      ),
+                    );
+                  },
+                  onAddVideo: () => _showAddVideoDialog(context, course),
+                );
+              },
             ),
     );
   }
@@ -194,37 +223,21 @@ class _TeacherCoursesScreenState extends State<TeacherCoursesScreen> {
               final title = titleController.text.trim();
               final description = descriptionController.text.trim();
 
-              // Call API to create course
               final response = await _courseService.createCourse(
                 title: title,
                 description: description,
               );
 
-              // Print the response
-              print('Create Course Response: $response');
-
-              if (response != null && response.containsKey('error')) {
+              if (response['success'] != true) {
                 GlobalScaffoldManager().showSnackbar(
-                  'Failed to create course: ${response['error']}',
+                  'Failed to create course',
                   type: SnackbarType.error,
                   duration: const Duration(seconds: 3),
                 );
                 return;
               }
 
-              // Also add to local list
-              _courseService.addTeacherCourse(
-                title: title,
-                description: description,
-              );
-
               Navigator.pop(context);
-              // Trigger rebuild by calling setState on the parent
-              final teacherState = context
-                  .findAncestorStateOfType<_TeacherCoursesScreenState>();
-              if (teacherState != null && teacherState.mounted) {
-                teacherState.setState(() {});
-              }
 
               GlobalScaffoldManager().showSnackbar(
                 'Course added successfully',
@@ -276,7 +289,7 @@ class _TeacherCoursesScreenState extends State<TeacherCoursesScreen> {
             child: const Text('Cancel'),
           ),
           ElevatedButton(
-            onPressed: () {
+            onPressed: () async {
               if (videoTitleController.text.trim().isEmpty) {
                 GlobalScaffoldManager().showSnackbar(
                   'Please enter a video title',
@@ -294,16 +307,22 @@ class _TeacherCoursesScreenState extends State<TeacherCoursesScreen> {
                 return;
               }
 
-              _courseService.addVideoToCourse(
-                courseTitle: course['title'],
+              final added = await _courseService.addVideoToCourse(
+                courseTitle: course['title'] as String,
                 videoTitle: videoTitleController.text.trim(),
                 videoUrl: videoUrlController.text.trim(),
               );
 
-              Navigator.pop(context);
-              if (mounted) {
-                setState(() {});
+              if (!added) {
+                GlobalScaffoldManager().showSnackbar(
+                  'Unable to add video',
+                  type: SnackbarType.error,
+                  duration: const Duration(seconds: 2),
+                );
+                return;
               }
+
+              Navigator.pop(context);
 
               GlobalScaffoldManager().showSnackbar(
                 'Video added successfully',
@@ -315,6 +334,92 @@ class _TeacherCoursesScreenState extends State<TeacherCoursesScreen> {
           ),
         ],
       ),
+    );
+  }
+}
+
+class TeacherStatsHeader extends StatelessWidget {
+  final CourseService courseService;
+
+  const TeacherStatsHeader({super.key, required this.courseService});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: EdgeInsets.only(bottom: 16.h),
+      padding: EdgeInsets.all(16.w),
+      decoration: BoxDecoration(
+        color: AppTheme.textPrimary.withOpacity(AppTheme.containerOpacity),
+        borderRadius: BorderRadius.circular(12.r),
+        border: Border.all(
+          color: AppTheme.textPrimary.withOpacity(AppTheme.borderOpacity),
+        ),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: _TeacherStatTile(
+              label: 'Courses',
+              value: courseService.teacherCourses.length.toString(),
+              icon: Icons.school,
+            ),
+          ),
+          Expanded(
+            child: _TeacherStatTile(
+              label: 'Lessons',
+              value: courseService.totalLessons.toString(),
+              icon: Icons.video_library,
+            ),
+          ),
+          Expanded(
+            child: _TeacherStatTile(
+              label: 'Enrolled',
+              value: courseService.enrolledCount.toString(),
+              icon: Icons.groups,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TeacherStatTile extends StatelessWidget {
+  final String label;
+  final String value;
+  final IconData icon;
+
+  const _TeacherStatTile({
+    required this.label,
+    required this.value,
+    required this.icon,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Icon(icon, color: AppTheme.secondaryColor, size: 22.sp),
+        SizedBox(height: 8.h),
+        Text(
+          value,
+          style: TextStyle(
+            color: AppTheme.textPrimary,
+            fontSize: 18.sp,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        SizedBox(height: 2.h),
+        Text(
+          label,
+          style: TextStyle(
+            color: AppTheme.textPrimary.withOpacity(
+              AppTheme.textSecondaryOpacity,
+            ),
+            fontSize: 11.sp,
+          ),
+        ),
+      ],
     );
   }
 }

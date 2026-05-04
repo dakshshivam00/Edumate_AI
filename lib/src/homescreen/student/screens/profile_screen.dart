@@ -6,14 +6,105 @@ import 'package:ailearning/src/common/user_role_service.dart';
 import 'package:ailearning/src/common/global_snackbar.dart';
 import 'package:ailearning/src/authentication/application/auth_provider.dart'
     as auth;
+import 'package:ailearning/src/homescreen/services/course_service.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-class ProfileScreen extends StatelessWidget {
+class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
+
+  @override
+  State<ProfileScreen> createState() => _ProfileScreenState();
+}
+
+class _ProfileScreenState extends State<ProfileScreen> {
+  static const String _profileNameKey = 'zoomate_profile_name';
+  final CourseService _courseService = CourseService();
+  String? _displayName;
+
+  @override
+  void initState() {
+    super.initState();
+    _courseService.addListener(_onCoursesChanged);
+    _loadProfile();
+  }
+
+  @override
+  void dispose() {
+    _courseService.removeListener(_onCoursesChanged);
+    super.dispose();
+  }
+
+  Future<void> _loadProfile() async {
+    await _courseService.ensureLoaded();
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() {
+      _displayName = prefs.getString(_profileNameKey);
+    });
+  }
+
+  void _onCoursesChanged() {
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _editProfile(BuildContext context) async {
+    final user = FirebaseAuth.instance.currentUser;
+    final controller = TextEditingController(
+      text: _displayName ?? user?.displayName ?? '',
+    );
+
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Edit Profile'),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(
+            labelText: 'Display name',
+            hintText: 'Enter your name',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+
+    controller.dispose();
+    if (name == null || name.isEmpty) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_profileNameKey, name);
+    if (!mounted) return;
+    setState(() => _displayName = name);
+    GlobalScaffoldManager().showSnackbar(
+      'Profile updated locally',
+      type: SnackbarType.success,
+    );
+  }
+
+  void _showInfo(String message) {
+    GlobalScaffoldManager().showSnackbar(
+      message,
+      type: SnackbarType.info,
+      duration: const Duration(seconds: 2),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     final user = FirebaseAuth.instance.currentUser;
+    final enrolledCourses = _courseService.enrolledCount;
+    final averageProgress = (_courseService.averageProgress * 100).round();
+    final certificates = _courseService.completedCount;
 
     return Scaffold(
       appBar: AppBar(
@@ -62,7 +153,7 @@ class ProfileScreen extends StatelessWidget {
                   ),
                   SizedBox(height: 20.h),
                   Text(
-                    user?.displayName ?? 'User Name',
+                    _displayName ?? user?.displayName ?? 'User Name',
                     style: TextStyle(
                       fontSize: 26.sp,
                       fontWeight: FontWeight.w700,
@@ -105,27 +196,27 @@ class ProfileScreen extends StatelessWidget {
             Row(
               children: [
                 Expanded(
-                  child: StatCard(
-                    title: 'Courses',
-                    value: '12',
-                    icon: Icons.school,
-                  ),
+	                  child: StatCard(
+	                    title: 'Courses',
+	                    value: enrolledCourses.toString(),
+	                    icon: Icons.school,
+	                  ),
                 ),
                 SizedBox(width: 12.w),
                 Expanded(
-                  child: StatCard(
-                    title: 'Progress',
-                    value: '68%',
-                    icon: Icons.trending_up,
-                  ),
+	                  child: StatCard(
+	                    title: 'Progress',
+	                    value: '$averageProgress%',
+	                    icon: Icons.trending_up,
+	                  ),
                 ),
                 SizedBox(width: 12.w),
                 Expanded(
-                  child: StatCard(
-                    title: 'Certificates',
-                    value: '5',
-                    icon: Icons.workspace_premium,
-                  ),
+	                  child: StatCard(
+	                    title: 'Certificates',
+	                    value: certificates.toString(),
+	                    icon: Icons.workspace_premium,
+	                  ),
                 ),
               ],
             ),
@@ -133,35 +224,35 @@ class ProfileScreen extends StatelessWidget {
             SizedBox(height: 32.h),
 
             // Menu Items
-            ProfileMenuItem(
-              icon: Icons.edit_outlined,
-              title: 'Edit Profile',
-              onTap: () {},
-            ),
+	            ProfileMenuItem(
+	              icon: Icons.edit_outlined,
+	              title: 'Edit Profile',
+	              onTap: () => _editProfile(context),
+	            ),
             SizedBox(height: 14.h),
-            ProfileMenuItem(
-              icon: Icons.notifications_outlined,
-              title: 'Notifications',
-              onTap: () {},
-            ),
+	            ProfileMenuItem(
+	              icon: Icons.notifications_outlined,
+	              title: 'Notifications',
+	              onTap: () => _showInfo('Notifications are local-only for now'),
+	            ),
             SizedBox(height: 14.h),
-            ProfileMenuItem(
-              icon: Icons.settings_outlined,
-              title: 'Settings',
-              onTap: () {},
-            ),
+	            ProfileMenuItem(
+	              icon: Icons.settings_outlined,
+	              title: 'Settings',
+	              onTap: () => _showInfo('Settings will be stored on device'),
+	            ),
             SizedBox(height: 14.h),
-            ProfileMenuItem(
-              icon: Icons.help_outline,
-              title: 'Help & Support',
-              onTap: () {},
-            ),
+	            ProfileMenuItem(
+	              icon: Icons.help_outline,
+	              title: 'Help & Support',
+	              onTap: () => _showInfo('Use global chat for app help'),
+	            ),
             SizedBox(height: 14.h),
-            ProfileMenuItem(
-              icon: Icons.info_outline,
-              title: 'About',
-              onTap: () {},
-            ),
+	            ProfileMenuItem(
+	              icon: Icons.info_outline,
+	              title: 'About',
+	              onTap: () => _showInfo('Zoomate AI local frontend prototype'),
+	            ),
             SizedBox(height: 32.h),
 
             // Logout Button

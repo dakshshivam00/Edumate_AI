@@ -1,312 +1,572 @@
 import 'dart:convert';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
-import 'package:ailearning/src/common/user_role_service.dart';
 
-/// Service to manage enrolled courses across the app
-class CourseService {
+import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+/// Local-first course store used while backend course APIs are unavailable.
+class CourseService extends ChangeNotifier {
   static final CourseService _instance = CourseService._internal();
   factory CourseService() => _instance;
   CourseService._internal();
 
-  static const String _baseUrl = 'http://35.238.224.109';
-  static const String _accessTokenKey = 'course_access_token';
-  final FirebaseAuth _auth = FirebaseAuth.instance;
-  final UserRoleService _userRoleService = UserRoleService();
+  static const String _coursesKey = 'zoomate_courses_v1';
+  static const String _enrolledCourseIdsKey = 'zoomate_enrolled_course_ids_v1';
+  static const String _progressKey = 'zoomate_course_progress_v1';
 
-  /// Get access token from /auth endpoint or use stored token
-  Future<String?> _getAccessToken() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final storedToken = prefs.getString(_accessTokenKey);
-      if (storedToken != null && storedToken.isNotEmpty) {
-        print('Course: Using stored access token');
-        return storedToken;
-      }
+  final List<Map<String, dynamic>> _courses = [];
+  final Set<String> _enrolledCourseIds = {};
+  final Map<String, double> _progressByCourseId = {};
 
-      print('Course: No stored token found, fetching from /auth endpoint...');
+  bool _loaded = false;
 
-      final user = _auth.currentUser;
-      if (user == null) {
-        print('Course: Firebase user is null');
-        return null;
-      }
+  Future<void> ensureLoaded() async {
+    if (_loaded) return;
 
-      final firebaseToken = await user.getIdToken(true);
-      if (firebaseToken == null) {
-        print('Course: Failed to get Firebase token');
-        return null;
-      }
+    final prefs = await SharedPreferences.getInstance();
+    final savedCourses = prefs.getString(_coursesKey);
 
-      final isStudent = await _userRoleService.isStudent();
-      final userType = isStudent ? 'user' : 'teacher';
-
-      final authUrl = Uri.parse('$_baseUrl/auth?user_type=$userType');
-      final authBody = jsonEncode({'firebase_token': firebaseToken});
-
-      print('Course: Calling /auth endpoint...');
-      final authResponse = await http.post(
-        authUrl,
-        headers: {'Content-Type': 'application/json'},
-        body: authBody,
+    _courses
+      ..clear()
+      ..addAll(
+        savedCourses == null
+            ? _cloneCourses(_defaultCourses)
+            : _decodeCourseList(savedCourses),
       );
 
-      print('Course: /auth response status: ${authResponse.statusCode}');
-      print('Course: /auth response body: ${authResponse.body}');
+    _enrolledCourseIds
+      ..clear()
+      ..addAll(
+        prefs.getStringList(_enrolledCourseIdsKey) ??
+            const ['java-dsa', 'flutter-development', 'adobe-premiere-pro'],
+      );
 
-      if (authResponse.statusCode >= 200 && authResponse.statusCode < 300) {
-        try {
-          final authData =
-              jsonDecode(authResponse.body) as Map<String, dynamic>;
+    _progressByCourseId
+      ..clear()
+      ..addAll(_decodeProgressMap(prefs.getString(_progressKey)));
 
-          String? accessToken;
-          if (authData.containsKey('access_token')) {
-            accessToken = authData['access_token'] as String;
-          } else if (authData.containsKey('token')) {
-            accessToken = authData['token'] as String;
-          } else if (authData.containsKey('accessToken')) {
-            accessToken = authData['accessToken'] as String;
-          } else {
-            final firstValue = authData.values.first;
-            if (firstValue is String) {
-              accessToken = firstValue;
-            }
-          }
+    _progressByCourseId.putIfAbsent('java-dsa', () => 0.25);
+    _progressByCourseId.putIfAbsent('flutter-development', () => 0.30);
+    _progressByCourseId.putIfAbsent('adobe-premiere-pro', () => 0.65);
+    _applyProgressToCourses();
 
-          if (accessToken != null && accessToken.isNotEmpty) {
-            await prefs.setString(_accessTokenKey, accessToken);
-            print('Course: Access token received and stored');
-            return accessToken;
-          }
-          return null;
-        } catch (e) {
-          print('Course: Failed to parse /auth response: $e');
-          return null;
-        }
-      }
-      return null;
-    } catch (e) {
-      print('Course: Exception getting access token: $e');
-      return null;
-    }
+    _loaded = true;
+    await _save();
+    notifyListeners();
   }
 
-  /// Create course via API
-  Future<Map<String, dynamic>?> createCourse({
+  List<Map<String, dynamic>> get marketplaceCourses =>
+      _cloneCourses(_courses);
+
+  List<Map<String, dynamic>> get teacherCourses => _cloneCourses(_courses);
+
+  List<Map<String, dynamic>> get enrolledCourses => _cloneCourses(
+    _courses.where((course) => _enrolledCourseIds.contains(course['id'])),
+  );
+
+  int get enrolledCount => _enrolledCourseIds.length;
+
+  int get completedCount => enrolledCourses
+      .where((course) => ((course['progress'] as num?)?.toDouble() ?? 0) >= 1)
+      .length;
+
+  double get averageProgress {
+    final courses = enrolledCourses;
+    if (courses.isEmpty) return 0;
+    final total = courses.fold<double>(
+      0,
+      (sum, course) => sum + ((course['progress'] as num?)?.toDouble() ?? 0),
+    );
+    return total / courses.length;
+  }
+
+  int get totalLessons => _courses.fold<int>(
+    0,
+    (sum, course) => sum + ((course['videoUrls'] as List?)?.length ?? 0),
+  );
+
+  Future<Map<String, dynamic>> createCourse({
     required String title,
     required String description,
+    String? instructor,
   }) async {
-    try {
-      final accessToken = await _getAccessToken();
-      if (accessToken == null || accessToken.isEmpty) {
-        print('Course: Failed to get access token');
-        return {'error': 'Failed to get access token'};
-      }
+    await ensureLoaded();
 
-      // Build URL with query parameters
-      final uri = Uri.parse('$_baseUrl/create-course').replace(
-        queryParameters: {
-          'course_title': title,
-          'course_description': description,
-        },
-      );
+    final id = _uniqueIdForTitle(title);
+    final course = {
+      'id': id,
+      'title': title,
+      'description': description,
+      'instructor': instructor?.trim().isNotEmpty == true
+          ? instructor!.trim()
+          : 'Zoomate Teacher',
+      'price': 'Free',
+      'rating': 0.0,
+      'students': 0,
+      'category': 'Teacher Course',
+      'progress': 0.0,
+      'thumbnail': '',
+      'videoUrls': <Map<String, String>>[],
+    };
 
-      print('Course: Creating course via API');
-      print('Course: Title: $title');
-      print('Course: Description: $description');
-      print('Course: URL: $uri');
-
-      final response = await http.post(
-        uri,
-        headers: {'Authorization': 'Bearer $accessToken'},
-      );
-
-      // Print response details
-      print('Course API Response Status: ${response.statusCode}');
-      print('Course API Response Headers: ${response.headers}');
-      print('Course API Response Body: ${response.body}');
-
-      if (response.statusCode >= 200 && response.statusCode < 300) {
-        try {
-          final responseData =
-              jsonDecode(response.body) as Map<String, dynamic>;
-          print('Course: Successfully created course');
-          print('Course: Response data: $responseData');
-          return responseData;
-        } catch (e) {
-          print('Course: Failed to parse JSON response: $e');
-          print('Course: Raw response body: ${response.body}');
-          return {'raw_response': response.body};
-        }
-      } else {
-        print('Course API Error: Status ${response.statusCode}');
-        print('Course API Error Response: ${response.body}');
-
-        if (response.statusCode == 401) {
-          print('Course: Token expired, clearing stored token...');
-          final prefs = await SharedPreferences.getInstance();
-          await prefs.remove(_accessTokenKey);
-        }
-
-        try {
-          final errorData = jsonDecode(response.body) as Map<String, dynamic>;
-          return errorData;
-        } catch (e) {
-          return {'error': response.body, 'status_code': response.statusCode};
-        }
-      }
-    } catch (e, stackTrace) {
-      print('Course API Exception: $e');
-      print('Course API Stack Trace: $stackTrace');
-      return {'error': e.toString()};
-    }
+    // Keep newly created courses at the top of teacher/student lists.
+    _courses.insert(0, course);
+    await _saveAndNotify();
+    return {'success': true, 'course': _cloneCourse(course)};
   }
 
-  final List<Map<String, dynamic>> _enrolledCourses = [
-    {
-      'title': 'Flutter Development Masterclass',
-      'instructor': 'John Doe',
-      'progress': 0.65,
-      'thumbnail': 'https://picsum.photos/400/300?random=1',
-      'videoUrls': [
-        'https://www.youtube.com/watch?v=1ukSR1GRtMU',
-        'https://www.youtube.com/watch?v=GIIQ1FZgZQI',
-        'https://www.youtube.com/watch?v=qeGFV5LELpk',
-        'https://www.youtube.com/watch?v=kJQP7kiw5Fk',
-      ],
-    },
-    {
-      'title': 'Machine Learning Fundamentals',
-      'instructor': 'Jane Smith',
-      'progress': 0.30,
-      'thumbnail': 'https://picsum.photos/400/300?random=2',
-      'videoUrls': [
-        'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
-        'https://www.youtube.com/watch?v=jNQXAC9IVRw',
-        'https://www.youtube.com/watch?v=9bZkp7q19f0',
-      ],
-    },
-    {
-      'title': 'Web Development Bootcamp',
-      'instructor': 'Mike Johnson',
-      'progress': 0.85,
-      'thumbnail': 'https://picsum.photos/400/300?random=3',
-      'videoUrls': [
-        'https://www.youtube.com/watch?v=kJQP7kiw5Fk',
-        'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
-        'https://www.youtube.com/watch?v=jNQXAC9IVRw',
-      ],
-    },
-  ];
-
-  List<Map<String, dynamic>> get enrolledCourses =>
-      List.unmodifiable(_enrolledCourses);
-
-  /// Add a course to enrolled courses after purchase
-  void addEnrolledCourse({
-    required String title,
-    required String instructor,
-    required String thumbnail,
-    required List<String> videoUrls,
-    double progress = 0.0,
-  }) {
-    // Check if course already exists
-    final exists = _enrolledCourses.any((course) => course['title'] == title);
-    if (!exists) {
-      _enrolledCourses.add({
-        'title': title,
-        'instructor': instructor,
-        'progress': progress,
-        'thumbnail': thumbnail,
-        'videoUrls': videoUrls,
-      });
-    }
-  }
-
-  /// Check if a course is already enrolled
-  bool isEnrolled(String courseTitle) {
-    return _enrolledCourses.any((course) => course['title'] == courseTitle);
-  }
-
-  // Teacher courses management
-  final List<Map<String, dynamic>> _teacherCourses = [
-    {
-      'title': 'Flutter Development Masterclass',
-      'description': 'Learn Flutter development from scratch',
-      'instructor': 'John Doe',
-      'thumbnail': 'https://picsum.photos/400/300?random=4',
-      'videoUrls': [
-        'https://www.youtube.com/watch?v=1ukSR1GRtMU',
-        'https://www.youtube.com/watch?v=GIIQ1FZgZQI',
-      ],
-    },
-    {
-      'title': 'Machine Learning Fundamentals',
-      'description': 'Introduction to machine learning concepts',
-      'instructor': 'Jane Smith',
-      'thumbnail': 'https://picsum.photos/400/300?random=5',
-      'videoUrls': [
-        'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
-        'https://www.youtube.com/watch?v=jNQXAC9IVRw',
-      ],
-    },
-  ];
-
-  List<Map<String, dynamic>> get teacherCourses =>
-      List.unmodifiable(_teacherCourses);
-
-  /// Add a new course for teachers
-  void addTeacherCourse({
+  Future<void> addTeacherCourse({
     required String title,
     required String description,
     String? instructor,
     String? thumbnail,
     List<String> videoUrls = const [],
-  }) {
-    _teacherCourses.add({
-      'title': title,
-      'description': description,
-      'instructor': instructor ?? '',
-      'thumbnail': thumbnail ?? '',
-      'videoUrls': videoUrls,
-    });
+  }) async {
+    await ensureLoaded();
+
+    final existing = _findCourseByTitle(title);
+    if (existing != null) return;
+
+    final response = await createCourse(
+      title: title,
+      description: description,
+      instructor: instructor,
+    );
+    final course = response['course'] as Map<String, dynamic>;
+    if (thumbnail != null && thumbnail.isNotEmpty) {
+      _findCourseById(course['id'] as String)?['thumbnail'] = thumbnail;
+    }
+    // Preserve incoming lesson order when insert(0) is used in addVideoToCourse.
+    for (final url in videoUrls.reversed) {
+      await addVideoToCourse(
+        courseTitle: title,
+        videoTitle: 'Lesson ${videoUrls.indexOf(url) + 1}',
+        videoUrl: url,
+      );
+    }
   }
 
-  /// Add a video to an existing teacher course
-  void addVideoToCourse({
+  Future<bool> addVideoToCourse({
     required String courseTitle,
     required String videoTitle,
     required String videoUrl,
-  }) {
-    final courseIndex = _teacherCourses.indexWhere(
-      (course) => course['title'] == courseTitle,
+  }) async {
+    await ensureLoaded();
+
+    final course = _findCourseByTitle(courseTitle);
+    if (course == null) return false;
+
+    final videos = _videoListFor(course);
+    // Keep newly added lessons visible first in course detail/cards.
+    videos.insert(0, {'title': videoTitle, 'url': videoUrl});
+    course['videoUrls'] = videos;
+    await _saveAndNotify();
+    return true;
+  }
+
+  Future<bool> deleteVideoFromCourse({
+    required String courseTitle,
+    required int index,
+  }) async {
+    await ensureLoaded();
+
+    final course = _findCourseByTitle(courseTitle);
+    if (course == null) return false;
+
+    final videos = _videoListFor(course);
+    if (index < 0 || index >= videos.length) return false;
+
+    videos.removeAt(index);
+    course['videoUrls'] = videos;
+    await _saveAndNotify();
+    return true;
+  }
+
+  Future<bool> enrollCourseByTitle(String courseTitle) async {
+    await ensureLoaded();
+
+    final course = _findCourseByTitle(courseTitle);
+    if (course == null) return false;
+
+    _enrolledCourseIds.add(course['id'] as String);
+    _progressByCourseId.putIfAbsent(course['id'] as String, () => 0);
+    _applyProgressToCourses();
+    await _saveAndNotify();
+    return true;
+  }
+
+  bool isEnrolled(String courseTitle) {
+    final course = _findCourseByTitle(courseTitle);
+    return course != null && _enrolledCourseIds.contains(course['id']);
+  }
+
+  double getCourseProgress(String courseTitle) {
+    final course = _findCourseByTitle(courseTitle);
+    if (course == null) return 0;
+    return _progressByCourseId[course['id']] ??
+        ((course['progress'] as num?)?.toDouble() ?? 0);
+  }
+
+  Future<void> updateProgress(String courseTitle, double progress) async {
+    await ensureLoaded();
+
+    final course = _findCourseByTitle(courseTitle);
+    if (course == null) return;
+
+    final clamped = progress.clamp(0.0, 1.0).toDouble();
+    final current = getCourseProgress(courseTitle);
+    if (clamped < current) return;
+
+    _progressByCourseId[course['id'] as String] = clamped;
+    course['progress'] = clamped;
+    await _saveAndNotify();
+  }
+
+  Future<void> markLessonWatched({
+    required String courseTitle,
+    required int lessonIndex,
+    required int lessonCount,
+  }) async {
+    if (lessonCount <= 0) return;
+    await updateProgress(courseTitle, (lessonIndex + 1) / lessonCount);
+  }
+
+  Map<String, dynamic>? getTeacherCourse(String courseTitle) {
+    final course = _findCourseByTitle(courseTitle);
+    return course == null ? null : _cloneCourse(course);
+  }
+
+  Map<String, dynamic>? getCourseByTitle(String courseTitle) =>
+      getTeacherCourse(courseTitle);
+
+  List<String> lessonTitlesFor(String courseTitle) {
+    final course = _findCourseByTitle(courseTitle);
+    if (course == null) return const [];
+    return _videoListFor(course)
+        .asMap()
+        .entries
+        .map((entry) => entry.value['title'] ?? 'Lesson ${entry.key + 1}')
+        .toList();
+  }
+
+  List<String> videoUrlsFor(String courseTitle) {
+    final course = _findCourseByTitle(courseTitle);
+    if (course == null) return const [];
+    return _videoListFor(course)
+        .map((video) => video['url'] ?? '')
+        .where((url) => url.isNotEmpty)
+        .toList();
+  }
+
+  Future<void> resetLocalData() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_coursesKey);
+    await prefs.remove(_enrolledCourseIdsKey);
+    await prefs.remove(_progressKey);
+    _loaded = false;
+    await ensureLoaded();
+  }
+
+  Future<void> _saveAndNotify() async {
+    _applyProgressToCourses();
+    await _save();
+    notifyListeners();
+  }
+
+  Future<void> _save() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_coursesKey, jsonEncode(_courses));
+    await prefs.setStringList(
+      _enrolledCourseIdsKey,
+      _enrolledCourseIds.toList(),
     );
-    if (courseIndex != -1) {
-      final videoUrls =
-          _teacherCourses[courseIndex]['videoUrls'] as List<dynamic>;
-      // Convert existing string URLs to map format if needed
-      final updatedVideos = videoUrls.asMap().entries.map((entry) {
-        final index = entry.key;
-        final video = entry.value;
-        if (video is String) {
-          return {'title': 'Video ${index + 1}', 'url': video};
-        }
-        return video;
-      }).toList();
-      updatedVideos.add({'title': videoTitle, 'url': videoUrl});
-      _teacherCourses[courseIndex]['videoUrls'] = updatedVideos;
+    await prefs.setString(_progressKey, jsonEncode(_progressByCourseId));
+  }
+
+  void _applyProgressToCourses() {
+    for (final course in _courses) {
+      final id = course['id'] as String?;
+      if (id == null) continue;
+      course['progress'] = _progressByCourseId[id] ??
+          ((course['progress'] as num?)?.toDouble() ?? 0);
     }
   }
 
-  /// Get course by title
-  Map<String, dynamic>? getTeacherCourse(String courseTitle) {
+  Map<String, dynamic>? _findCourseByTitle(String title) {
+    final normalized = title.trim().toLowerCase();
+    for (final course in _courses) {
+      if ((course['title'] as String? ?? '').trim().toLowerCase() ==
+          normalized) {
+        return course;
+      }
+    }
+    return null;
+  }
+
+  Map<String, dynamic>? _findCourseById(String id) {
+    for (final course in _courses) {
+      if (course['id'] == id) return course;
+    }
+    return null;
+  }
+
+  String _uniqueIdForTitle(String title) {
+    final base = _slugify(title);
+    var candidate = base;
+    var suffix = 2;
+    while (_courses.any((course) => course['id'] == candidate)) {
+      candidate = '$base-$suffix';
+      suffix++;
+    }
+    return candidate;
+  }
+
+  String _slugify(String input) {
+    final slug = input
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9]+'), '-')
+        .replaceAll(RegExp(r'^-+|-+$'), '');
+    return slug.isEmpty ? 'course' : slug;
+  }
+
+  List<Map<String, String>> _videoListFor(Map<String, dynamic> course) {
+    final rawVideos = (course['videoUrls'] as List?) ?? [];
+    return rawVideos.asMap().entries.map((entry) {
+      final video = entry.value;
+      if (video is Map) {
+        return {
+          'title':
+              (video['title'] ?? video['name'] ?? 'Lesson ${entry.key + 1}')
+                  .toString(),
+          'url': (video['url'] ?? video['videoUrl'] ?? '').toString(),
+        };
+      }
+      return {'title': 'Lesson ${entry.key + 1}', 'url': video.toString()};
+    }).toList();
+  }
+
+  static List<Map<String, dynamic>> _decodeCourseList(String value) {
     try {
-      return _teacherCourses.firstWhere(
-        (course) => course['title'] == courseTitle,
-      );
-    } catch (e) {
-      return null;
+      final decoded = jsonDecode(value) as List<dynamic>;
+      return decoded
+          .whereType<Map>()
+          .map((course) => Map<String, dynamic>.from(course))
+          .toList();
+    } catch (_) {
+      return _cloneCourses(_defaultCourses);
     }
   }
+
+  static Map<String, double> _decodeProgressMap(String? value) {
+    if (value == null) return {};
+    try {
+      final decoded = jsonDecode(value) as Map<String, dynamic>;
+      return decoded.map(
+        (key, progress) => MapEntry(
+          key,
+          progress is num ? progress.toDouble() : double.tryParse('$progress') ?? 0,
+        ),
+      );
+    } catch (_) {
+      return {};
+    }
+  }
+
+  static Map<String, dynamic> _cloneCourse(Map<String, dynamic> course) =>
+      Map<String, dynamic>.from(jsonDecode(jsonEncode(course)) as Map);
+
+  static List<Map<String, dynamic>> _cloneCourses(Iterable<dynamic> courses) =>
+      courses
+          .map((course) => _cloneCourse(Map<String, dynamic>.from(course)))
+          .toList();
+
+  static final List<Map<String, dynamic>> _defaultCourses = [
+    {
+      'id': 'java-dsa',
+      'title': 'JAVA & DSA',
+      'description': 'Step-by-step Java and data structures practice.',
+      'instructor': 'Shradha Khapra',
+      'price': 'Free',
+      'rating': 4.9,
+      'students': 12,
+      'category': 'Programming',
+      'progress': 0.25,
+      'thumbnail': '',
+      'videoUrls': [
+        {
+          'title': 'Java introduction',
+          'url': 'https://youtu.be/luAkR9VaLcw?si=y72Bsnk-xR4643yi',
+        },
+        {
+          'title': 'Variables and data types',
+          'url': 'https://youtu.be/XQfHvqp7kXU?si=GV_zGM6uHBmdUNOY',
+        },
+        {
+          'title': 'Operators',
+          'url': 'https://youtu.be/2uoO_fY1aDs?si=JFph3_U5slTCOM-G',
+        },
+        {
+          'title': 'Conditional statements',
+          'url':
+              'https://youtu.be/0r1SfRoLuzU?list=PLfqMhTWNBTe3LtFWcvwpqTkUSlB32kJop',
+        },
+        {
+          'title': 'Loops',
+          'url':
+              'https://youtu.be/GjHNGM7KN3w?list=PLfqMhTWNBTe3LtFWcvwpqTkUSlB32kJop',
+        },
+        {
+          'title': 'Patterns',
+          'url':
+              'https://youtu.be/Dr4PpNa7AYo?list=PLfqMhTWNBTe3LtFWcvwpqTkUSlB32kJop',
+        },
+      ],
+    },
+    {
+      'id': 'flutter-development',
+      'title': 'Flutter Development',
+      'description': 'Build mobile apps with Flutter widgets and navigation.',
+      'instructor': 'WS Cube',
+      'price': 'Free',
+      'rating': 4.8,
+      'students': 9,
+      'category': 'Mobile',
+      'progress': 0.30,
+      'thumbnail': '',
+      'videoUrls': [
+        {
+          'title': 'Flutter setup',
+          'url':
+              'https://youtu.be/jqxz7QvdWk8?list=PLjVLYmrlmjGfGLShoW0vVX_tcyT8u1Y3E',
+        },
+        {
+          'title': 'First app',
+          'url':
+              'https://youtu.be/PKDWinlLfAo?list=PLjVLYmrlmjGfGLShoW0vVX_tcyT8u1Y3E',
+        },
+        {
+          'title': 'Widgets',
+          'url':
+              'https://youtu.be/BqHOtlh3Dd4?list=PLjVLYmrlmjGfGLShoW0vVX_tcyT8u1Y3E',
+        },
+        {
+          'title': 'Layouts',
+          'url':
+              'https://youtu.be/VPoqbBXzGtA?list=PLjVLYmrlmjGfGLShoW0vVX_tcyT8u1Y3E',
+        },
+        {
+          'title': 'Navigation',
+          'url':
+              'https://youtu.be/SR-AB3RJWbg?list=PLjVLYmrlmjGfGLShoW0vVX_tcyT8u1Y3E',
+        },
+      ],
+    },
+    {
+      'id': 'adobe-premiere-pro',
+      'title': 'Adobe Premiere Pro',
+      'description': 'Edit videos with timelines, cuts, audio, and exports.',
+      'instructor': 'GFX Mentor',
+      'price': 'Free',
+      'rating': 4.7,
+      'students': 7,
+      'category': 'Editing',
+      'progress': 0.65,
+      'thumbnail': '',
+      'videoUrls': [
+        {
+          'title': 'Premiere Pro basics',
+          'url':
+              'https://youtu.be/h6eeDgBjZq8?list=PLW-zSkCnZ-gABGZU8--ISUauyewG40Yex',
+        },
+        {
+          'title': 'Timeline editing',
+          'url':
+              'https://youtu.be/TP8wre-Mm1k?list=PLW-zSkCnZ-gABGZU8--ISUauyewG40Yex',
+        },
+        {
+          'title': 'Audio cleanup',
+          'url':
+              'https://youtu.be/kCGNe7BFq6g?list=PLW-zSkCnZ-gABGZU8--ISUauyewG40Yex',
+        },
+        {
+          'title': 'Export settings',
+          'url':
+              'https://youtu.be/2TyL6ViQDwQ?list=PLW-zSkCnZ-gABGZU8--ISUauyewG40Yex',
+        },
+      ],
+    },
+    {
+      'id': 'machine-learning',
+      'title': 'Machine Learning Fundamentals',
+      'description': 'Learn core ML concepts, models, and evaluation.',
+      'instructor': 'Jane Smith',
+      'price': '\$79.99',
+      'rating': 4.9,
+      'students': 23,
+      'category': 'AI',
+      'progress': 0.0,
+      'thumbnail': '',
+      'videoUrls': [
+        {
+          'title': 'What is machine learning?',
+          'url': 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+        },
+        {
+          'title': 'Supervised learning',
+          'url': 'https://www.youtube.com/watch?v=jNQXAC9IVRw',
+        },
+        {
+          'title': 'Model evaluation',
+          'url': 'https://www.youtube.com/watch?v=9bZkp7q19f0',
+        },
+      ],
+    },
+    {
+      'id': 'web-development',
+      'title': 'Web Development Bootcamp',
+      'description': 'HTML, CSS, JavaScript, and frontend fundamentals.',
+      'instructor': 'Mike Johnson',
+      'price': '\$59.99',
+      'rating': 4.7,
+      'students': 18,
+      'category': 'Web',
+      'progress': 0.0,
+      'thumbnail': '',
+      'videoUrls': [
+        {
+          'title': 'HTML foundations',
+          'url': 'https://www.youtube.com/watch?v=kJQP7kiw5Fk',
+        },
+        {
+          'title': 'CSS layout',
+          'url': 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+        },
+        {
+          'title': 'JavaScript basics',
+          'url': 'https://www.youtube.com/watch?v=jNQXAC9IVRw',
+        },
+      ],
+    },
+    {
+      'id': 'ui-ux-design',
+      'title': 'UI/UX Design',
+      'description': 'Design usable interfaces, flows, and prototypes.',
+      'instructor': 'David Brown',
+      'price': '\$39.99',
+      'rating': 4.6,
+      'students': 10,
+      'category': 'Design',
+      'progress': 0.0,
+      'thumbnail': '',
+      'videoUrls': [
+        {
+          'title': 'Design thinking',
+          'url': 'https://www.youtube.com/watch?v=GIIQ1FZgZQI',
+        },
+        {
+          'title': 'Wireframes',
+          'url': 'https://www.youtube.com/watch?v=qeGFV5LELpk',
+        },
+      ],
+    },
+  ];
 }
