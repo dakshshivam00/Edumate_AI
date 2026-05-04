@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:ailearning/src/common/app_theme.dart';
+import 'package:ailearning/src/common/user_role_service.dart';
+import 'package:ailearning/src/services/chat_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class TeacherAIChatScreen extends StatefulWidget {
@@ -10,6 +12,7 @@ class TeacherAIChatScreen extends StatefulWidget {
   final double courseProgress;
   final int? currentLessonIndex;
   final List<String> allowedLessonTitles;
+  final String? userRole;
 
   const TeacherAIChatScreen({
     super.key,
@@ -18,6 +21,7 @@ class TeacherAIChatScreen extends StatefulWidget {
     this.courseProgress = 0,
     this.currentLessonIndex,
     this.allowedLessonTitles = const [],
+    this.userRole,
   });
 
   @override
@@ -27,20 +31,37 @@ class TeacherAIChatScreen extends StatefulWidget {
 class _TeacherAIChatScreenState extends State<TeacherAIChatScreen> {
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
+  final ChatService _chatService = ChatService();
+  final UserRoleService _userRoleService = UserRoleService();
   final List<ChatMessage> _messages = [];
   bool _isLoading = false;
+  String _resolvedUserRole = 'student';
 
   bool get _isCourseChat =>
       widget.courseTitle != null && widget.courseTitle!.trim().isNotEmpty;
 
-  String get _historyKey => _isCourseChat
-      ? 'zoomate_course_chat_${widget.courseTitle!.trim().toLowerCase()}'
-      : 'zoomate_global_chat';
+  String get _historyKey {
+    final roleSegment = _resolvedUserRole.trim().toLowerCase();
+    return _isCourseChat
+        ? 'edumate_ai_${roleSegment}_course_chat_${widget.courseTitle!.trim().toLowerCase()}'
+        : 'edumate_ai_${roleSegment}_global_chat';
+  }
 
   @override
   void initState() {
     super.initState();
-    _loadHistory();
+    _initializeChat();
+  }
+
+  Future<void> _initializeChat() async {
+    if (widget.userRole != null && widget.userRole!.trim().isNotEmpty) {
+      _resolvedUserRole = widget.userRole!.trim().toLowerCase();
+    } else {
+      _resolvedUserRole = await _userRoleService.isTeacher()
+          ? 'teacher'
+          : 'student';
+    }
+    await _loadHistory();
   }
 
   Future<void> _loadHistory() async {
@@ -84,7 +105,7 @@ class _TeacherAIChatScreenState extends State<TeacherAIChatScreen> {
 
     return ChatMessage(
       text:
-          'Hello! I\'m your Zoomate AI assistant. Ask me anything, or use the course chat from a lesson when you want restricted help.',
+          'Hello! I\'m your Edumate AI assistant. Ask me anything, or use the course chat from a lesson when you want restricted help.',
       isUser: false,
       timestamp: DateTime.now(),
     );
@@ -123,18 +144,63 @@ class _TeacherAIChatScreenState extends State<TeacherAIChatScreen> {
     _messageController.clear();
     _scrollToBottom();
 
-    await Future.delayed(const Duration(milliseconds: 450));
-    final response = _generateLocalResponse(text);
+    final prompt = _isCourseChat
+        ? _buildCourseScopedPrompt(text)
+        : _buildGlobalPrompt(text);
+
+    String responseText = '';
+    final stream = (widget.videoUrl != null && widget.videoUrl!.trim().isNotEmpty)
+        ? _chatService.sendChatMessageWithVideoStream(
+            query: prompt,
+            videoUrl: widget.videoUrl!,
+          )
+        : _chatService.sendChatMessageStream(query: prompt);
+
+    await for (final chunk in stream) {
+      if (chunk.startsWith('error:')) {
+        responseText = 'Failed to get response: ${chunk.substring(6)}';
+        break;
+      }
+      responseText += chunk;
+    }
 
     if (!mounted) return;
     setState(() {
       _messages.add(
-        ChatMessage(text: response, isUser: false, timestamp: DateTime.now()),
+        ChatMessage(
+          text: responseText.trim().isEmpty
+              ? 'No response received. Please try again.'
+              : responseText.trim(),
+          isUser: false,
+          timestamp: DateTime.now(),
+        ),
       );
       _isLoading = false;
     });
     await _saveHistory();
     _scrollToBottom();
+  }
+
+  String _buildGlobalPrompt(String query) {
+    return 'You are an AI tutor inside the Edumate AI learning app. '
+        'Provide concise, practical, student-friendly answers.\n\n'
+        'User question: $query';
+  }
+
+  String _buildCourseScopedPrompt(String query) {
+    final unlockedCount = widget.allowedLessonTitles.length;
+    final progress = (widget.courseProgress * 100).round();
+    final lessons = widget.allowedLessonTitles.isEmpty
+        ? 'current lesson'
+        : widget.allowedLessonTitles.join(', ');
+
+    return 'You are an AI tutor in course-restricted mode.\n'
+        'Course: ${widget.courseTitle}\n'
+        'Progress: $progress%\n'
+        'Unlocked lessons: $unlockedCount\n'
+        'Allowed syllabus scope: $lessons\n'
+        'If user asks outside this scope, politely refuse and guide to unlocked topics.\n\n'
+        'User question: $query';
   }
 
   Future<void> _saveHistory() async {
@@ -143,142 +209,6 @@ class _TeacherAIChatScreenState extends State<TeacherAIChatScreen> {
       _historyKey,
       jsonEncode(_messages.map((message) => message.toJson()).toList()),
     );
-  }
-
-  String _generateLocalResponse(String query) {
-    return _isCourseChat
-        ? _generateCourseResponse(query)
-        : _generateGlobalResponse(query);
-  }
-
-  String _generateCourseResponse(String query) {
-    final lower = query.toLowerCase();
-    final unlockedCount = widget.allowedLessonTitles.length;
-    final requestedLesson = _requestedLessonNumber(lower);
-
-    if (requestedLesson != null && requestedLesson > unlockedCount) {
-      return 'This course chat is progress-restricted. You have unlocked only the first $unlockedCount lesson${unlockedCount == 1 ? '' : 's'} of ${widget.courseTitle}, so I cannot answer from lesson $requestedLesson yet. Watch more lectures to unlock that topic.';
-    }
-
-    if (_asksForFutureContent(lower)) {
-      return 'I will keep this answer inside your unlocked syllabus. For now, focus on: ${_allowedLessonSummary()}. I can explain, summarize, or quiz you on these lessons.';
-    }
-
-    if (_asksForQuiz(lower)) {
-      return jsonEncode({
-        'questions': [
-          {
-            'question':
-                'Which part of ${widget.courseTitle} should you revise first based on your unlocked progress?',
-            'options': [
-              widget.allowedLessonTitles.isEmpty
-                  ? 'The current lesson'
-                  : widget.allowedLessonTitles.first,
-              'A locked future lesson',
-              'An unrelated topic',
-              'Skip all practice',
-            ],
-            'answer': widget.allowedLessonTitles.isEmpty
-                ? 'The current lesson'
-                : widget.allowedLessonTitles.first,
-          },
-          {
-            'question':
-                'What is the best way to use course chat in Zoomate AI?',
-            'options': [
-              'Ask only from unlocked course content',
-              'Ask for answers from future chapters',
-              'Ignore the current lecture',
-              'Use it only for account settings',
-            ],
-            'answer': 'Ask only from unlocked course content',
-          },
-        ],
-      });
-    }
-
-    if (lower.contains('summar')) {
-      return 'Summary for your unlocked ${widget.courseTitle} syllabus: ${_allowedLessonSummary()}. Revise the definitions, write a small example from each lesson, and then solve a quick practice question before moving ahead.';
-    }
-
-    if (lower.contains('explain') || lower.contains('doubt')) {
-      return 'Here is a simple explanation inside your current course boundary: break the topic into what it means, why it is used, and one small example. For ${widget.courseTitle}, stay focused on ${_allowedLessonSummary()}.';
-    }
-
-    return 'I can help with this, but only from your unlocked ${widget.courseTitle} content. Based on your ${(widget.courseProgress * 100).round()}% progress, use these lessons as the source: ${_allowedLessonSummary()}.';
-  }
-
-  String _generateGlobalResponse(String query) {
-    final lower = query.toLowerCase();
-
-    if (_asksForQuiz(lower)) {
-      return jsonEncode({
-        'questions': [
-          {
-            'question': 'What is the main purpose of Zoomate AI?',
-            'options': [
-              'Structured learning with AI support',
-              'Only social messaging',
-              'Only video editing',
-              'Only payment tracking',
-            ],
-            'answer': 'Structured learning with AI support',
-          },
-          {
-            'question':
-                'Which chat mode should students use for syllabus-limited help?',
-            'options': [
-              'Course chat',
-              'Profile page',
-              'Settings page',
-              'Launcher screen',
-            ],
-            'answer': 'Course chat',
-          },
-        ],
-      });
-    }
-
-    if (lower.contains('course chat') || lower.contains('global chat')) {
-      return 'Global chat is open for general questions. Course chat is opened from a lecture and stays restricted to the lessons unlocked by the student progress.';
-    }
-
-    if (lower.contains('study plan') || lower.contains('plan')) {
-      return 'A good study plan is: watch one lecture, write short notes, ask course chat for doubts, solve a small quiz, then move to the next lecture only after the idea feels clear.';
-    }
-
-    return 'I can help with general learning, programming doubts, explanations, quiz ideas, and planning. Since this is frontend-only right now, I answer with local guidance rather than calling an external AI backend.';
-  }
-
-  int? _requestedLessonNumber(String query) {
-    final match = RegExp(
-      r'(lesson|lecture|video)\s*(\d+)',
-    ).firstMatch(query);
-    if (match == null) return null;
-    return int.tryParse(match.group(2) ?? '');
-  }
-
-  bool _asksForFutureContent(String query) {
-    return query.contains('future') ||
-        query.contains('next chapter') ||
-        query.contains('next lesson') ||
-        query.contains('advanced') ||
-        query.contains('beyond syllabus') ||
-        query.contains('upcoming');
-  }
-
-  bool _asksForQuiz(String query) {
-    return query.contains('quiz') ||
-        query.contains('test') ||
-        query.contains('question') ||
-        query.contains('mcq');
-  }
-
-  String _allowedLessonSummary() {
-    if (widget.allowedLessonTitles.isEmpty) {
-      return 'the current lesson';
-    }
-    return widget.allowedLessonTitles.join(', ');
   }
 
   Widget _buildPromptChips() {

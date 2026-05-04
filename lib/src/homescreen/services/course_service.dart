@@ -9,9 +9,9 @@ class CourseService extends ChangeNotifier {
   factory CourseService() => _instance;
   CourseService._internal();
 
-  static const String _coursesKey = 'zoomate_courses_v1';
-  static const String _enrolledCourseIdsKey = 'zoomate_enrolled_course_ids_v1';
-  static const String _progressKey = 'zoomate_course_progress_v1';
+  static const String _coursesKey = 'edumate_ai_courses_v1';
+  static const String _enrolledCourseIdsKey = 'edumate_ai_enrolled_course_ids_v1';
+  static const String _progressKey = 'edumate_ai_course_progress_v1';
 
   final List<Map<String, dynamic>> _courses = [];
   final Set<String> _enrolledCourseIds = {};
@@ -98,7 +98,7 @@ class CourseService extends ChangeNotifier {
       'description': description,
       'instructor': instructor?.trim().isNotEmpty == true
           ? instructor!.trim()
-          : 'Zoomate Teacher',
+          : 'Edumate AI Teacher',
       'price': 'Free',
       'rating': 0.0,
       'students': 0,

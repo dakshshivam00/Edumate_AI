@@ -19,8 +19,8 @@ class _TeacherHomeScreenState extends State<TeacherHomeScreen> {
 
   final List<Widget> _screens = [
     const TeacherCoursesScreen(),
-    const TeacherAIChatScreen(),
-    const ProfileScreen(),
+    const TeacherAIChatScreen(userRole: 'teacher'),
+    const ProfileScreen(userRole: 'teacher'),
   ];
 
   @override

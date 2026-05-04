@@ -1,16 +1,78 @@
 import 'dart:convert';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ailearning/src/common/user_role_service.dart';
 
 class ChatService {
   static const String _baseUrl = 'http://35.238.224.109';
+  static const String _geminiBaseUrl =
+      'https://generativelanguage.googleapis.com/v1beta';
+  static const String _geminiModel = 'gemini-2.5-flash';
+  static const String _geminiApiKey = 'AIzaSyCJERlnWUjhJVmoWyzt3XVLhdRnOxtym8o';
   // static const String _baseUrl =
       // 'https://welcomed-wildcat-actively.ngrok-free.app';
   static const String _accessTokenKey = 'chat_access_token';
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final UserRoleService _userRoleService = UserRoleService();
+
+  Future<String?> _generateWithGemini(String prompt) async {
+    try {
+      final uri = Uri.parse(
+        '$_geminiBaseUrl/models/$_geminiModel:generateContent',
+      );
+      debugPrint('Gemini: Request URL: $uri');
+      final response = await http.post(
+        uri,
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': _geminiApiKey,
+        },
+        body: jsonEncode({
+          'contents': [
+            {
+              'parts': [
+                {'text': prompt},
+              ],
+            },
+          ],
+        }),
+      );
+
+      debugPrint('Gemini: Status: ${response.statusCode}');
+      debugPrint('Gemini: Raw response: ${response.body}');
+
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return null;
+      }
+
+      final payload = jsonDecode(response.body) as Map<String, dynamic>;
+      final candidates = payload['candidates'];
+      if (candidates is! List || candidates.isEmpty) return null;
+
+      final first = candidates.first;
+      if (first is! Map) return null;
+      final content = first['content'];
+      if (content is! Map) return null;
+      final parts = content['parts'];
+      if (parts is! List) return null;
+
+      final buffer = StringBuffer();
+      for (final part in parts) {
+        if (part is Map && part['text'] != null) {
+          buffer.write(part['text'].toString());
+        }
+      }
+      final text = buffer.toString().trim();
+      debugPrint('Gemini: Parsed text length: ${text.length}');
+      return text.isEmpty ? null : text;
+    } catch (e, stackTrace) {
+      debugPrint('Gemini: Exception: $e');
+      debugPrint('Gemini: Stack trace: $stackTrace');
+      return null;
+    }
+  }
 
   /// Extract video ID and query parameters from YouTube URL
   /// Returns format: "videoId?queryParams" or just "videoId" if no query params
@@ -53,7 +115,7 @@ class ChatService {
       // Return format: "videoId?queryParams" or just "videoId"
       return queryParams.isNotEmpty ? '$videoId?$queryParams' : videoId;
     } catch (e) {
-      print('Chat: Failed to extract video ID from URL: $e');
+      debugPrint('Chat: Failed to extract video ID from URL: $e');
       // Return original URL if extraction fails
       return videoUrl;
     }
@@ -67,46 +129,46 @@ class ChatService {
       final prefs = await SharedPreferences.getInstance();
       final storedToken = prefs.getString(_accessTokenKey);
       if (storedToken != null && storedToken.isNotEmpty) {
-        print('Chat: Using stored access token');
+        debugPrint('Chat: Using stored access token');
         return storedToken;
       }
 
-      print('Chat: No stored token found, fetching from /auth endpoint...');
+      debugPrint('Chat: No stored token found, fetching from /auth endpoint...');
 
       // Get Firebase user
       final user = _auth.currentUser;
       if (user == null) {
-        print('Chat: Firebase user is null - user not authenticated');
+        debugPrint('Chat: Firebase user is null - user not authenticated');
         return null;
       }
 
       // Get Firebase token
-      print('Chat: Getting Firebase token...');
+      debugPrint('Chat: Getting Firebase token...');
       final firebaseToken = await user.getIdToken(true);
       if (firebaseToken == null) {
-        print('Chat: Failed to get Firebase token');
+        debugPrint('Chat: Failed to get Firebase token');
         return null;
       }
-      print('Chat: Firebase token received');
+      debugPrint('Chat: Firebase token received');
 
       // Get user role to determine user_type
       final isStudent = await _userRoleService.isStudent();
       final userType = isStudent ? 'user' : 'teacher';
-      print('Chat: User type: $userType');
+      debugPrint('Chat: User type: $userType');
 
       // Call /auth endpoint to get access token
       final authUrl = Uri.parse('$_baseUrl/auth?user_type=$userType');
       final authBody = jsonEncode({'firebase_token': firebaseToken});
 
-      print('Chat: Calling /auth endpoint...');
+      debugPrint('Chat: Calling /auth endpoint...');
       final authResponse = await http.post(
         authUrl,
         headers: {'Content-Type': 'application/json'},
         body: authBody,
       );
 
-      print('Chat: /auth response status: ${authResponse.statusCode}');
-      print('Chat: /auth response body: ${authResponse.body}');
+      debugPrint('Chat: /auth response status: ${authResponse.statusCode}');
+      debugPrint('Chat: /auth response body: ${authResponse.body}');
 
       if (authResponse.statusCode >= 200 && authResponse.statusCode < 300) {
         try {
@@ -123,7 +185,7 @@ class ChatService {
             accessToken = authData['accessToken'] as String;
           } else {
             // Try to get first string value if key is unknown
-            print(
+            debugPrint(
               'Chat: Warning - access token key not found, trying to extract from response',
             );
             final firstValue = authData.values.first;
@@ -135,25 +197,25 @@ class ChatService {
           if (accessToken != null && accessToken.isNotEmpty) {
             // Store the access token for future use
             await prefs.setString(_accessTokenKey, accessToken);
-            print('Chat: Access token received and stored successfully');
+            debugPrint('Chat: Access token received and stored successfully');
             return accessToken;
           } else {
-            print('Chat: Failed to extract access token from /auth response');
+            debugPrint('Chat: Failed to extract access token from /auth response');
             return null;
           }
         } catch (e) {
-          print('Chat: Failed to parse /auth response: $e');
+          debugPrint('Chat: Failed to parse /auth response: $e');
           return null;
         }
       } else {
-        print(
+        debugPrint(
           'Chat: /auth endpoint error: ${authResponse.statusCode} - ${authResponse.body}',
         );
         return null;
       }
     } catch (e, stackTrace) {
-      print('Chat: Exception getting access token: $e');
-      print('Chat: Stack trace: $stackTrace');
+      debugPrint('Chat: Exception getting access token: $e');
+      debugPrint('Chat: Stack trace: $stackTrace');
       return null;
     }
   }
@@ -162,98 +224,12 @@ class ChatService {
   /// [query] - The chat query/message
   /// Returns a stream of response chunks
   Stream<String> sendChatMessageStream({required String query}) async* {
-    try {
-      // Get access token (from storage or /auth endpoint)
-      final accessToken = await _getAccessToken();
-      if (accessToken == null || accessToken.isEmpty) {
-        print('Chat: Failed to get access token');
-        yield 'error:Failed to get access token. Please try again.';
-        return;
-      }
-
-      // Build URL with query parameters
-      final uri = Uri.parse('$_baseUrl/chat');
-
-      print('Chat: Preparing streaming request');
-      print('Chat: Query: $query');
-      print('Chat: Sending request to: $uri');
-
-      // Create streaming request
-      final request = http.Request('POST', uri);
-      request.headers['Authorization'] = 'Bearer $accessToken';
-      request.headers['Accept'] = 'text/event-stream';
-      request.headers['Content-Type'] = 'application/json';
-      request.body = jsonEncode({'query': query});
-
-      final streamedResponse = await request.send();
-
-      print('Chat: Stream response status: ${streamedResponse.statusCode}');
-
-      if (streamedResponse.statusCode >= 200 &&
-          streamedResponse.statusCode < 300) {
-        // Handle streaming response
-        await for (final chunk
-            in streamedResponse.stream
-                .transform(const Utf8Decoder())
-                .transform(const LineSplitter())) {
-          if (chunk.isNotEmpty) {
-            // Handle Server-Sent Events format
-            if (chunk.startsWith('data: ')) {
-              final data = chunk.substring(6).trim();
-              if (data.isNotEmpty && data != '[DONE]') {
-                try {
-                  // Try to parse as JSON
-                  final jsonData = jsonDecode(data) as Map<String, dynamic>;
-                  if (jsonData.containsKey('content') ||
-                      jsonData.containsKey('text') ||
-                      jsonData.containsKey('delta')) {
-                    final content =
-                        jsonData['content'] ??
-                        jsonData['text'] ??
-                        jsonData['delta'];
-                    if (content != null) {
-                      yield content.toString();
-                    }
-                  } else {
-                    // If no content field, yield the entire chunk
-                    yield data;
-                  }
-                } catch (e) {
-                  // If not JSON, yield as plain text
-                  yield data;
-                }
-              }
-            } else if (!chunk.startsWith('event:') &&
-                !chunk.startsWith('id:') &&
-                chunk.trim().isNotEmpty) {
-              // Handle plain text streaming
-              yield chunk;
-            }
-          }
-        }
-      } else {
-        // Handle error
-        final errorBody = await streamedResponse.stream
-            .transform(const Utf8Decoder())
-            .join();
-        print('Chat API Error: Status ${streamedResponse.statusCode}');
-        print('Chat API Error Response: $errorBody');
-
-        // If unauthorized (401), clear stored token
-        if (streamedResponse.statusCode == 401) {
-          print('Chat: Token expired or invalid, clearing stored token...');
-          final prefs = await SharedPreferences.getInstance();
-          await prefs.remove(_accessTokenKey);
-          print('Chat: Stored token cleared');
-        }
-
-        yield 'error:${streamedResponse.statusCode}:$errorBody';
-      }
-    } catch (e, stackTrace) {
-      print('Chat API Exception: $e');
-      print('Chat API Stack Trace: $stackTrace');
-      yield 'error:${e.toString()}';
+    final text = await _generateWithGemini(query);
+    if (text == null || text.isEmpty) {
+      yield 'error:Unable to fetch response from Gemini. Please try again.';
+      return;
     }
+    yield text;
   }
 
   /// Send chat message to backend (non-streaming, for backward compatibility)
@@ -264,7 +240,7 @@ class ChatService {
       // Get access token (from storage or /auth endpoint)
       final accessToken = await _getAccessToken();
       if (accessToken == null || accessToken.isEmpty) {
-        print('Chat: Failed to get access token');
+        debugPrint('Chat: Failed to get access token');
         return {'error': 'Failed to get access token. Please try again.'};
       }
 
@@ -273,9 +249,9 @@ class ChatService {
         '$_baseUrl/chat',
       ).replace(queryParameters: {'query': query});
 
-      print('Chat: Preparing request');
-      print('Chat: Query: $query');
-      print('Chat: Sending request to: $uri');
+      debugPrint('Chat: Preparing request');
+      debugPrint('Chat: Query: $query');
+      debugPrint('Chat: Sending request to: $uri');
 
       // Send POST request with access token in Authorization header
       final response = await http.post(
@@ -283,38 +259,38 @@ class ChatService {
         headers: {'Authorization': 'Bearer $accessToken'},
       );
 
-      // Print response details
-      print('Chat API Response Status: ${response.statusCode}');
-      print('Chat API Response Headers: ${response.headers}');
-      print('Chat API Response Body: ${response.body}');
+      // debugPrint response details
+      debugPrint('Chat API Response Status: ${response.statusCode}');
+      debugPrint('Chat API Response Headers: ${response.headers}');
+      debugPrint('Chat API Response Body: ${response.body}');
 
       if (response.statusCode >= 200 && response.statusCode < 300) {
         try {
           final responseData =
               jsonDecode(response.body) as Map<String, dynamic>;
-          print('Chat: Successfully received response');
-          print('Chat: Response data: $responseData');
+          debugPrint('Chat: Successfully received response');
+          debugPrint('Chat: Response data: $responseData');
           return responseData;
         } catch (e) {
-          print('Chat: Failed to parse JSON response: $e');
-          print('Chat: Raw response body: ${response.body}');
+          debugPrint('Chat: Failed to parse JSON response: $e');
+          debugPrint('Chat: Raw response body: ${response.body}');
           return {'raw_response': response.body};
         }
       } else {
-        print('Chat API Error: Status ${response.statusCode}');
-        print('Chat API Error Response: ${response.body}');
+        debugPrint('Chat API Error: Status ${response.statusCode}');
+        debugPrint('Chat API Error Response: ${response.body}');
 
         // If unauthorized (401), clear stored token and try to get a new one
         if (response.statusCode == 401) {
-          print('Chat: Token expired or invalid, clearing stored token...');
+          debugPrint('Chat: Token expired or invalid, clearing stored token...');
           final prefs = await SharedPreferences.getInstance();
           await prefs.remove(_accessTokenKey);
-          print('Chat: Stored token cleared');
+          debugPrint('Chat: Stored token cleared');
 
           // Try to get a new token and retry the request
           final newAccessToken = await _getAccessToken();
           if (newAccessToken != null && newAccessToken.isNotEmpty) {
-            print('Chat: Retrying with new access token...');
+            debugPrint('Chat: Retrying with new access token...');
             final retryResponse = await http.post(
               uri,
               headers: {'Authorization': 'Bearer $newAccessToken'},
@@ -325,10 +301,10 @@ class ChatService {
               try {
                 final responseData =
                     jsonDecode(retryResponse.body) as Map<String, dynamic>;
-                print('Chat: Successfully received response after retry');
+                debugPrint('Chat: Successfully received response after retry');
                 return responseData;
               } catch (e) {
-                print('Chat: Failed to parse retry response: $e');
+                debugPrint('Chat: Failed to parse retry response: $e');
                 return {'raw_response': retryResponse.body};
               }
             }
@@ -344,9 +320,9 @@ class ChatService {
         }
       }
     } catch (e, stackTrace) {
-      // Print error details
-      print('Chat API Exception: $e');
-      print('Chat API Stack Trace: $stackTrace');
+      // debugPrint error details
+      debugPrint('Chat API Exception: $e');
+      debugPrint('Chat API Stack Trace: $stackTrace');
       return {'error': e.toString()};
     }
   }
@@ -359,110 +335,15 @@ class ChatService {
     required String query,
     required String videoUrl,
   }) async* {
-    try {
-      // Get access token (from storage or /auth endpoint)
-      final accessToken = await _getAccessToken();
-      if (accessToken == null || accessToken.isEmpty) {
-        print('Chat: Failed to get access token');
-        yield 'error:Failed to get access token. Please try again.';
-        return;
-      }
-
-      // Build URL with query parameters
-      final uri = Uri.parse('$_baseUrl/chat');
-
-      // Extract video ID and query parameters from URL
-      final extractedVideoId = _extractVideoIdAndParams(videoUrl);
-
-      print('Chat: Preparing streaming request with video URL');
-      print('Chat: Query: $query');
-      print('Chat: Original Video URL: $videoUrl');
-      print('Chat: Extracted Video ID: $extractedVideoId');
-      print('Chat: Sending request to: $uri');
-
-      // Create streaming request with JSON body
-      final request = http.Request('POST', uri);
-      request.headers['Authorization'] = 'Bearer $accessToken';
-      request.headers['Accept'] = 'text/event-stream';
-      request.headers['Content-Type'] = 'application/json';
-
-      // Encode the request body as JSON with extracted video ID
-      request.body = jsonEncode({
-        'query': query,
-        'video_url': extractedVideoId,
-      });
-
-      final streamedResponse = await request.send();
-
-      print('Chat: Stream response status: ${streamedResponse.statusCode}');
-
-      if (streamedResponse.statusCode >= 200 &&
-          streamedResponse.statusCode < 300) {
-        // Handle streaming response
-        await for (final chunk
-            in streamedResponse.stream
-                .transform(const Utf8Decoder())
-                .transform(const LineSplitter())) {
-          if (chunk.isNotEmpty) {
-            // Handle Server-Sent Events format
-            if (chunk.startsWith('data: ')) {
-              final data = chunk.substring(6).trim();
-              if (data.isNotEmpty && data != '[DONE]') {
-                try {
-                  // Try to parse as JSON
-                  final jsonData = jsonDecode(data) as Map<String, dynamic>;
-                  // Handle format: {"type": "response", "content": "..."}
-                  if (jsonData.containsKey('content')) {
-                    final content = jsonData['content'];
-                    if (content != null) {
-                      yield content.toString();
-                    }
-                  } else if (jsonData.containsKey('text') ||
-                      jsonData.containsKey('delta')) {
-                    final content = jsonData['text'] ?? jsonData['delta'];
-                    if (content != null) {
-                      yield content.toString();
-                    }
-                  } else {
-                    // If no content field, yield the entire chunk
-                    yield data;
-                  }
-                } catch (e) {
-                  // If not JSON, yield as plain text
-                  yield data;
-                }
-              }
-            } else if (!chunk.startsWith('event:') &&
-                !chunk.startsWith('id:') &&
-                chunk.trim().isNotEmpty) {
-              // Handle plain text streaming
-              yield chunk;
-            }
-          }
-        }
-      } else {
-        // Handle error
-        final errorBody = await streamedResponse.stream
-            .transform(const Utf8Decoder())
-            .join();
-        print('Chat API Error: Status ${streamedResponse.statusCode}');
-        print('Chat API Error Response: $errorBody');
-
-        // If unauthorized (401), clear stored token
-        if (streamedResponse.statusCode == 401) {
-          print('Chat: Token expired or invalid, clearing stored token...');
-          final prefs = await SharedPreferences.getInstance();
-          await prefs.remove(_accessTokenKey);
-          print('Chat: Stored token cleared');
-        }
-
-        yield 'error:${streamedResponse.statusCode}:$errorBody';
-      }
-    } catch (e, stackTrace) {
-      print('Chat API Exception: $e');
-      print('Chat API Stack Trace: $stackTrace');
-      yield 'error:${e.toString()}';
+    final extractedVideoId = _extractVideoIdAndParams(videoUrl);
+    final prompt =
+        'Use this YouTube video context: $extractedVideoId\n\nUser question: $query';
+    final text = await _generateWithGemini(prompt);
+    if (text == null || text.isEmpty) {
+      yield 'error:Unable to fetch response from Gemini. Please try again.';
+      return;
     }
+    yield text;
   }
 
   /// Send chat message with video URL to backend
@@ -477,7 +358,7 @@ class ChatService {
       // Get access token (from storage or /auth endpoint)
       final accessToken = await _getAccessToken();
       if (accessToken == null || accessToken.isEmpty) {
-        print('Chat: Failed to get access token');
+        debugPrint('Chat: Failed to get access token');
         return {'error': 'Failed to get access token. Please try again.'};
       }
 
@@ -489,11 +370,11 @@ class ChatService {
       // Extract video ID and query parameters from URL
       final extractedVideoId = _extractVideoIdAndParams(videoUrl);
 
-      print('Chat: Preparing request with video URL');
-      print('Chat: Query: $query');
-      print('Chat: Original Video URL: $videoUrl');
-      print('Chat: Extracted Video ID: $extractedVideoId');
-      print('Chat: Sending request to: $uri');
+      debugPrint('Chat: Preparing request with video URL');
+      debugPrint('Chat: Query: $query');
+      debugPrint('Chat: Original Video URL: $videoUrl');
+      debugPrint('Chat: Extracted Video ID: $extractedVideoId');
+      debugPrint('Chat: Sending request to: $uri');
 
       // Send POST request with access token in Authorization header
       final requestBody = jsonEncode({
@@ -510,33 +391,33 @@ class ChatService {
         body: requestBody,
       );
 
-      // Print response details
-      print('Chat API Response Status: ${response.statusCode}');
-      print('Chat API Response Headers: ${response.headers}');
-      print('Chat API Response Body: ${response.body}');
+      // debugPrint response details
+      debugPrint('Chat API Response Status: ${response.statusCode}');
+      debugPrint('Chat API Response Headers: ${response.headers}');
+      debugPrint('Chat API Response Body: ${response.body}');
 
       if (response.statusCode >= 200 && response.statusCode < 300) {
         try {
           final responseData =
               jsonDecode(response.body) as Map<String, dynamic>;
-          print('Chat: Successfully received response');
-          print('Chat: Response data: $responseData');
+          debugPrint('Chat: Successfully received response');
+          debugPrint('Chat: Response data: $responseData');
           return responseData;
         } catch (e) {
-          print('Chat: Failed to parse JSON response: $e');
-          print('Chat: Raw response body: ${response.body}');
+          debugPrint('Chat: Failed to parse JSON response: $e');
+          debugPrint('Chat: Raw response body: ${response.body}');
           return {'raw_response': response.body};
         }
       } else {
-        print('Chat API Error: Status ${response.statusCode}');
-        print('Chat API Error Response: ${response.body}');
+        debugPrint('Chat API Error: Status ${response.statusCode}');
+        debugPrint('Chat API Error Response: ${response.body}');
 
         // If unauthorized (401), clear stored token
         if (response.statusCode == 401) {
-          print('Chat: Token expired or invalid, clearing stored token...');
+          debugPrint('Chat: Token expired or invalid, clearing stored token...');
           final prefs = await SharedPreferences.getInstance();
           await prefs.remove(_accessTokenKey);
-          print('Chat: Stored token cleared');
+          debugPrint('Chat: Stored token cleared');
         }
 
         // Try to parse error response
@@ -548,9 +429,9 @@ class ChatService {
         }
       }
     } catch (e, stackTrace) {
-      // Print error details
-      print('Chat API Exception: $e');
-      print('Chat API Stack Trace: $stackTrace');
+      // debugPrint error details
+      debugPrint('Chat API Exception: $e');
+      debugPrint('Chat API Stack Trace: $stackTrace');
       return {'error': e.toString()};
     }
   }

@@ -11,16 +11,22 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class ProfileScreen extends StatefulWidget {
-  const ProfileScreen({super.key});
+  final String userRole;
+
+  const ProfileScreen({super.key, this.userRole = 'student'});
 
   @override
   State<ProfileScreen> createState() => _ProfileScreenState();
 }
 
 class _ProfileScreenState extends State<ProfileScreen> {
-  static const String _profileNameKey = 'zoomate_profile_name';
+  static const String _profileNameKeyPrefix = 'edumate_ai_profile_name';
   final CourseService _courseService = CourseService();
   String? _displayName;
+  bool get _isTeacher => widget.userRole.trim().toLowerCase() == 'teacher';
+
+  String get _profileNameKey =>
+      '${_profileNameKeyPrefix}_${_isTeacher ? 'teacher' : 'student'}';
 
   @override
   void initState() {
@@ -102,9 +108,23 @@ class _ProfileScreenState extends State<ProfileScreen> {
   @override
   Widget build(BuildContext context) {
     final user = FirebaseAuth.instance.currentUser;
-    final enrolledCourses = _courseService.enrolledCount;
-    final averageProgress = (_courseService.averageProgress * 100).round();
-    final certificates = _courseService.completedCount;
+    final stat1Title = _isTeacher ? 'Courses' : 'Courses';
+    final stat1Value = _isTeacher
+        ? _courseService.teacherCourses.length.toString()
+        : _courseService.enrolledCount.toString();
+    final stat1Icon = _isTeacher ? Icons.school : Icons.school;
+
+    final stat2Title = _isTeacher ? 'Lessons' : 'Progress';
+    final stat2Value = _isTeacher
+        ? _courseService.totalLessons.toString()
+        : '${(_courseService.averageProgress * 100).round()}%';
+    final stat2Icon = _isTeacher ? Icons.video_library : Icons.trending_up;
+
+    final stat3Title = _isTeacher ? 'Enrolled' : 'Certificates';
+    final stat3Value = _isTeacher
+        ? _courseService.enrolledCount.toString()
+        : _courseService.completedCount.toString();
+    final stat3Icon = _isTeacher ? Icons.groups : Icons.workspace_premium;
 
     return Scaffold(
       appBar: AppBar(
@@ -196,27 +216,27 @@ class _ProfileScreenState extends State<ProfileScreen> {
             Row(
               children: [
                 Expanded(
-	                  child: StatCard(
-	                    title: 'Courses',
-	                    value: enrolledCourses.toString(),
-	                    icon: Icons.school,
-	                  ),
+                  child: StatCard(
+                    title: stat1Title,
+                    value: stat1Value,
+                    icon: stat1Icon,
+                  ),
                 ),
                 SizedBox(width: 12.w),
                 Expanded(
-	                  child: StatCard(
-	                    title: 'Progress',
-	                    value: '$averageProgress%',
-	                    icon: Icons.trending_up,
-	                  ),
+                  child: StatCard(
+                    title: stat2Title,
+                    value: stat2Value,
+                    icon: stat2Icon,
+                  ),
                 ),
                 SizedBox(width: 12.w),
                 Expanded(
-	                  child: StatCard(
-	                    title: 'Certificates',
-	                    value: certificates.toString(),
-	                    icon: Icons.workspace_premium,
-	                  ),
+                  child: StatCard(
+                    title: stat3Title,
+                    value: stat3Value,
+                    icon: stat3Icon,
+                  ),
                 ),
               ],
             ),
@@ -251,7 +271,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
 	            ProfileMenuItem(
 	              icon: Icons.info_outline,
 	              title: 'About',
-	              onTap: () => _showInfo('Zoomate AI local frontend prototype'),
+              onTap: () => _showInfo('Edumate AI local frontend prototype'),
 	            ),
             SizedBox(height: 32.h),
 

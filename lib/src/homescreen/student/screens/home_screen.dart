@@ -21,8 +21,8 @@ class _HomeScreenState extends State<HomeScreen> {
   final List<Widget> _screens = [
     const CourseMarketplaceScreen(),
     const EnrolledScreen(),
-    const TeacherAIChatScreen(),
-    const ProfileScreen(),
+    const TeacherAIChatScreen(userRole: 'student'),
+    const ProfileScreen(userRole: 'student'),
   ];
 
   @override
