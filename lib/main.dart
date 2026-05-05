@@ -7,10 +7,20 @@ import 'package:ailearning/src/homescreen/teacher/screens/home_screen.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
+
+Future<void> _loadEnv() async {
+  try {
+    await dotenv.load(fileName: '.env');
+  } catch (_) {
+    // Missing or invalid .env is non-fatal; ChatService skips AI when key absent.
+  }
+}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await _loadEnv();
   await Firebase.initializeApp();
   runApp(const MyApp());
 }

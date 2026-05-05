@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ailearning/src/common/user_role_service.dart';
@@ -9,45 +10,70 @@ class ChatService {
   static const String _baseUrl = 'http://35.238.224.109';
   static const String _geminiBaseUrl =
       'https://generativelanguage.googleapis.com/v1beta';
-  static const String _geminiModel = 'gemini-2.5-flash';
-  static const String _geminiApiKey = 'AIzaSyCJERlnWUjhJVmoWyzt3XVLhdRnOxtym8o';
-  // static const String _baseUrl =
-      // 'https://welcomed-wildcat-actively.ngrok-free.app';
-  static const String _accessTokenKey = 'chat_access_token';
-  final FirebaseAuth _auth = FirebaseAuth.instance;
-  final UserRoleService _userRoleService = UserRoleService();
+  static const String _defaultGeminiModel = 'gemini-2.5-flash';
 
-  Future<String?> _generateWithGemini(String prompt) async {
+  /// From `.env` key `GEMINI_API_KEY`, loaded via `flutter_dotenv` in `main.dart`.
+  static String _geminiApiKey() =>
+      (dotenv.env['GEMINI_API_KEY'] ?? '').trim();
+
+  /// Single model id, e.g. `GEMINI_MODEL=gemini-2.5-flash` — no fallback chain.
+  static String _geminiModel() {
+    final m = (dotenv.env['GEMINI_MODEL'] ?? '').trim();
+    return m.isEmpty ? _defaultGeminiModel : m;
+  }
+
+  static Duration? _retryDelayFromGeminiErrorBody(String body) {
     try {
-      final uri = Uri.parse(
-        '$_geminiBaseUrl/models/$_geminiModel:generateContent',
-      );
-      debugPrint('Gemini: Request URL: $uri');
-      final response = await http.post(
-        uri,
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': _geminiApiKey,
-        },
-        body: jsonEncode({
-          'contents': [
-            {
-              'parts': [
-                {'text': prompt},
-              ],
-            },
-          ],
-        }),
-      );
-
-      debugPrint('Gemini: Status: ${response.statusCode}');
-      debugPrint('Gemini: Raw response: ${response.body}');
-
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        return null;
+      final root = jsonDecode(body);
+      if (root is! Map) return null;
+      final err = root['error'];
+      if (err is! Map) return null;
+      final details = err['details'];
+      if (details is! List) return null;
+      for (final d in details) {
+        if (d is! Map) continue;
+        final delayStr = d['retryDelay']?.toString();
+        if (delayStr == null || delayStr.isEmpty) continue;
+        final match = RegExp(r'^(\d+)s$').firstMatch(delayStr.trim());
+        if (match != null) {
+          final sec = int.tryParse(match.group(1) ?? '') ?? 0;
+          return Duration(seconds: sec.clamp(1, 120));
+        }
       }
+    } catch (_) {}
+    return null;
+  }
 
-      final payload = jsonDecode(response.body) as Map<String, dynamic>;
+  static Future<http.Response> _postGeminiGenerate({
+    required String apiKey,
+    required String model,
+    required String prompt,
+  }) {
+    final uri = Uri.parse(
+      '$_geminiBaseUrl/models/$model:generateContent',
+    );
+    debugPrint('Gemini: Request URL: $uri');
+    return http.post(
+      uri,
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey,
+      },
+      body: jsonEncode({
+        'contents': [
+          {
+            'parts': [
+              {'text': prompt},
+            ],
+          },
+        ],
+      }),
+    );
+  }
+
+  static String? _textFromGeminiSuccessBody(String body) {
+    try {
+      final payload = jsonDecode(body) as Map<String, dynamic>;
       final candidates = payload['candidates'];
       if (candidates is! List || candidates.isEmpty) return null;
 
@@ -65,8 +91,66 @@ class ChatService {
         }
       }
       final text = buffer.toString().trim();
-      debugPrint('Gemini: Parsed text length: ${text.length}');
       return text.isEmpty ? null : text;
+    } catch (_) {
+      return null;
+    }
+  }
+  // static const String _baseUrl =
+      // 'https://welcomed-wildcat-actively.ngrok-free.app';
+  static const String _accessTokenKey = 'chat_access_token';
+  final FirebaseAuth _auth = FirebaseAuth.instance;
+  final UserRoleService _userRoleService = UserRoleService();
+
+  Future<String?> _generateWithGemini(String prompt) async {
+    final apiKey = _geminiApiKey();
+    if (apiKey.isEmpty) {
+      debugPrint('Chat: GEMINI_API_KEY missing in .env');
+      return null;
+    }
+
+    final model = _geminiModel();
+    try {
+      var response = await _postGeminiGenerate(
+        apiKey: apiKey,
+        model: model,
+        prompt: prompt,
+      );
+
+      debugPrint('Gemini: Model $model status: ${response.statusCode}');
+      debugPrint('Gemini: Raw response: ${response.body}');
+
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        final text = _textFromGeminiSuccessBody(response.body);
+        if (text != null) {
+          debugPrint('Gemini: Parsed text length: ${text.length}');
+          return text;
+        }
+        return null;
+      }
+
+      // Transient overload — one retry on the same model only.
+      if (response.statusCode == 503) {
+        final wait = _retryDelayFromGeminiErrorBody(response.body) ??
+            const Duration(seconds: 2);
+        debugPrint('Gemini: 503, retry after ${wait.inSeconds}s');
+        await Future<void>.delayed(wait);
+        response = await _postGeminiGenerate(
+          apiKey: apiKey,
+          model: model,
+          prompt: prompt,
+        );
+        debugPrint('Gemini: Retry status: ${response.statusCode}');
+        if (response.statusCode >= 200 && response.statusCode < 300) {
+          final text = _textFromGeminiSuccessBody(response.body);
+          if (text != null) {
+            debugPrint('Gemini: Parsed text length: ${text.length}');
+            return text;
+          }
+        }
+      }
+
+      return null;
     } catch (e, stackTrace) {
       debugPrint('Gemini: Exception: $e');
       debugPrint('Gemini: Stack trace: $stackTrace');
